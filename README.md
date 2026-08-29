@@ -22,6 +22,7 @@
 - Start a new dungeon and everything should be working.
 - Render resolutions other than 100% are not supported.
 - Interactable and loot drop highlights must be disabled.
+- Bloom must be disabled.
 
 ## Development
 
