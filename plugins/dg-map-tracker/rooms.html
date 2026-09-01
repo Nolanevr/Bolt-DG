@@ -236,25 +236,13 @@
   .cell.unopened .corridor.w {
     background-image: linear-gradient(to left, rgba(0,0,0,0.85), transparent 65%);
   }
-  /* Key we hold: swap the parity border colour to a bright silver-white so
-     the room reads as unlocked at a glance. Crit/unknown use solid; bonus
-     stays muted with a dashed border so it doesn't pull focus. */
-  .cell.key-held { border-color: #e6e6e6 !important; }
-  .cell.par-crit.key-held,
-  .cell.par-unknown.key-held { border-style: solid !important; }
-  /* CRIT *and* we hold its key: yellow. This is the single most actionable cell
-     on the map -- the next move on the critical path, already unlocked -- so it
-     gets its own colour rather than being folded into the generic silver.
-     It also fixes a real blind spot: silver overrode the crit border, and on an
-     UNOPENED room the crit background is the only other parity channel and the
-     recess shadow below buries it -- so crit+key-held was the one combination
-     that displayed no parity at all. Beats .cell.key-held on specificity
-     (0,3,0 vs 0,2,0), which is what settles it since both are !important. */
-  .cell.par-crit.key-held { border-color: #ffe14d !important; }
-  .cell.par-bonus.key-held {
-    border-color: #b8b0a0 !important;
-    border-style: dashed !important;
-  }
+  /* Default (Crit / Unknown) - Bright Green and Bright Red */
+  .cell.key-held { border-color: #33ff33 !important; border-style: solid !important; }
+  .cell.key-missing { border-color: #ff0000 !important; border-style: solid !important; }
+  
+  /* Bonus Parity - Darker Green and Darker Red */
+  .cell.par-bonus.key-held { border-color: #1e8c1e !important; border-style: solid !important; }
+  .cell.par-bonus.key-missing { border-color: #b30000 !important; border-style: solid !important; }
 
   .doors { position: absolute; inset: 0; pointer-events: none; z-index: 0; }
   .overlays {
@@ -740,8 +728,14 @@
               if (heldKeys.has(lower)) canOpen = true;
             }
           }
-          if (hasKeyblock) cell.classList.add("has-keyblock");
-          if (canOpen)     cell.classList.add("key-held");
+          if (hasKeyblock) {
+            cell.classList.add("has-keyblock");
+            if (canOpen) {
+              cell.classList.add("key-held");
+            } else {
+              cell.classList.add("key-missing");
+            }
+          }
         }
 
         // Find the room-body name so we can draw its doors.

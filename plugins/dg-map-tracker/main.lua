@@ -4298,6 +4298,10 @@ bolt.onrendergameview(function (event)
                 if FRONT[dir] then
                   local style = chevron_style(cgx, cgz, dir)
                   local color = door_color(cgx, cgz, dir)
+                  -- Override parity color if this specific door is the guardian
+                  if guardian_door(cgx, cgz, dir, rtx, rtz) then
+                    color = "guardian_magenta"
+                  end
                   -- Openability distinction (solid vs corner brackets) is PARKED:
                   -- draw the C solid regardless. `style` still carries
                   -- "solid"/"brackets" and the bracket renderer is intact -- swap
@@ -4326,8 +4330,8 @@ bolt.onrendergameview(function (event)
         -- door leads to). Merged perimeter: draw a tile edge only when the
         -- neighbouring tile is NOT in the same shape (no internal lines). Corner
         -- brackets: a tick along each boundary edge at every corner.
-        local buckets = { gray = {}, green = {}, yellow = {}, red = {} }
-        local fills   = { gray = {}, green = {}, yellow = {} }   -- per-colour tile fills
+        local buckets = { gray = {}, green = {}, yellow = {}, guardian_magenta = {}, red = {} }
+        local fills   = { gray = {}, green = {}, yellow = {}, guardian_magenta = {}, red = {} }   -- per-colour tile fills
         for _, sh in ipairs(shapes) do
           local quads = buckets[sh.color]
           local fillq = fills[sh.color]
@@ -4397,6 +4401,7 @@ bolt.onrendergameview(function (event)
           { "gray",   0.62, 0.62, 0.62 },
           { "green",  0.25, 0.90, 0.35 },
           { "yellow", 1.00, 0.90, 0.15 },
+          { "guardian_magenta", 1.00, 0.15, 0.90 }, -- Unique Guardian Door color
           { "red",    1.00, 0.15, 0.15 },   -- guardian-room 2nd outline, drawn last
         }
         -- Fills FIRST, each matching its outline colour, UNDER the lines (a touch

@@ -81,6 +81,7 @@
     // ---- state --------------------------------------------------------------
     const keyMeshRaw = {}, keyAtlasImageData = {}, imgAtlasImageData = {}, iconCanvasCache = {};
     let heldKeys = new Set(), lastRooms = null, deadReason = "";
+    let cameraAngle = 0; // Tracks the FOV cone angle
     const COLORS = { gold:"#d4a03e", silver:"#c8c8c8", blue:"#4b7dc4", green:"#4b9c58",
       purple:"#8654a9", crimson:"#b04a4a", orange:"#d67c3c", yellow:"#e0c73e" };
     const SHAPE_NAMES = new Set(["triangle","rectangle","wedge","corner","pentagon","diamond","shield","crescent"]);
@@ -116,10 +117,10 @@
       .cell.unopened .corridor.s{background-image:linear-gradient(to bottom,rgba(0,0,0,0.6),transparent 65%);}
       .cell.unopened .corridor.e{background-image:linear-gradient(to right,rgba(0,0,0,0.6),transparent 65%);}
       .cell.unopened .corridor.w{background-image:linear-gradient(to left,rgba(0,0,0,0.6),transparent 65%);}
-      .cell.key-held{border-color:#e6e6e6 !important;}
-      .cell.par-crit.key-held,.cell.par-unknown.key-held{border-style:solid !important;}
-      .cell.par-crit.key-held{border-color:#ffe14d !important;}
-      .cell.par-bonus.key-held{border-color:#b8b0a0 !important;border-style:dashed !important;}
+      .cell.key-held{border-color:#33ff33 !important; border-style:solid !important;}
+      .cell.key-missing{border-color:#ff0000 !important; border-style:solid !important;}
+      .cell.par-bonus.key-held{border-color:#1e8c1e !important; border-style:solid !important;}
+      .cell.par-bonus.key-missing{border-color:#b30000 !important; border-style:solid !important;}
       .unopened-question{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
         font-family:'Trebuchet MS',sans-serif;font-weight:900;font-size:{FONT}px;line-height:1;
         color:var(--accent);text-shadow:0 0 4px rgba(0,0,0,0.9),0 1px 2px rgba(0,0,0,0.9);}
@@ -240,7 +241,7 @@
     const roomInfo = (r) => {
       const kind = bodyKind(r.images);
       let body = null;
-      for (const n of r.images) if (n.startsWith("UNOPENED_")||n.startsWith("2WAY_")||n.startsWith("3WAY_")||n==="4WAY"||n.startsWith("DE_")||n==="ICON_BASE"||n==="ICON_BOSS") { body=n; break; }
+      for (const n of r.images) if (n.startsWith("UNOPENED_")||n.startsWith("2WAY_")||n.startsWith("3WAY_")||n==="4WAY"||n.startsWith("DE_")||n.startsWith("ICON_BASE")||n.startsWith("ICON_BOSS")) { body=n; break; }
       let canOpen=false, hasKeyblock=false;
       if (kind==="unopened") for (const n of r.images) {
         const l=n.toLowerCase();
@@ -248,7 +249,7 @@
           hasKeyblock=true; if (heldKeys.has(l)) canOpen=true;
         }
       }
-      return { kind, body, canOpen, hasKeyblock };
+      return { kind, body, canOpen, hasKeyblock, parity: r.parity };
     };
 
     // ---- chrome: build icon-less grid HTML, render via foreignObject --------
@@ -263,7 +264,13 @@
           const pc = (r.parity==="bonus") ? "par-bonus" : (r.parity==="crit") ? "par-crit" : "par-unknown";
           cls += " " + pc;
         }
-        if (info.canOpen) cls += " key-held";
+        if (info.hasKeyblock) {
+          if (info.canOpen) {
+            cls += " key-held";
+          } else {
+            cls += " key-missing";
+          }
+        }
         let inner = "";
         if (info.body) { const d = parseDoors(info.body);
           if (d.n) inner += '<div class="corridor n"></div>';
@@ -345,11 +352,34 @@
           iconShadow(false, g.cell);
         }
       }
-      // Top pass: player markers over everything drawn above.
+// Top pass: player markers over everything drawn above.
       for (const d of playerDraws) {
         const ins = 0.2*g.cell;
         const pos = { 1:[d.x0+ins,d.y0+ins], 2:[d.x0+g.cell-ins,d.y0+ins], 3:[d.x0+ins,d.y0+g.cell-ins],
                       4:[d.x0+g.cell-ins,d.y0+g.cell-ins], 5:[d.x0+g.cell/2,d.y0+g.cell/2] };  // 4 = BR, 5 = centre
+        
+        // --- NEW: Visual Camera FOV Cone ---
+        for (const n of d.players) {
+          if (n === "PLAYER_RED") {
+            const s = PLAYER_SLOTS[n] || 1, p = pos[s];
+            // Shift -90 degrees because Canvas 0 is East, while Game 0 is North
+            const angleRad = (cameraAngle - 90) * (Math.PI / 180); 
+            const fov = Math.PI / 2.5; // ~72 degree vision cone
+            const radius = 0.8 * g.cell; 
+
+            ctx.beginPath();
+            ctx.moveTo(p[0], p[1]);
+            ctx.arc(p[0], p[1], radius, angleRad - fov/2, angleRad + fov/2);
+            ctx.closePath();
+            
+            ctx.fillStyle = "rgba(0, 255, 255, 0.35)"; // Translucent light blue
+            ctx.fill();
+            ctx.strokeStyle = "rgba(0, 255, 255, 0.85)"; // Solid light blue edges
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+          }
+        }
+
         iconShadow(true, g.cell);
         for (const n of d.players) { const s=PLAYER_SLOTS[n]||1, p=pos[s], c=imgIcon(n);
           if (c) drawFit(c, p[0], p[1], 0.32*g.cell, false); }
@@ -388,6 +418,31 @@
         ctx.moveTo(RE / 2, 0); ctx.lineTo(RE / 2, RE);
         ctx.moveTo(0, RE / 2); ctx.lineTo(RE, RE / 2);
         ctx.stroke();
+       // --- NEW: Light blue corridor lines ---
+        if (lastRooms) {
+          ctx.strokeStyle = "rgba(0, 255, 255, 0.9)"; 
+          ctx.lineWidth = Math.max(2, 3 * (RE / EDGE)); // 2-3px scaled
+          ctx.lineCap = "square";
+          ctx.beginPath();
+          
+          const p = gE.pad * (RE / EDGE), s = gE.step * (RE / EDGE), c = gE.cell * (RE / EDGE);
+          
+          for (const r of lastRooms) {
+            if (r.gx < 0 || r.gx > 7 || r.gz < 0 || r.gz > 7) continue;
+            const info = roomInfo(r);
+            if (!info.body) continue; 
+            
+            const d = parseDoors(info.body);
+            const cx = p + r.gx * s + c / 2;
+            const cy = p + r.gz * s + c / 2;
+            
+            if (d.n) { ctx.moveTo(cx, cy); ctx.lineTo(cx, cy - s / 2); }
+            if (d.s) { ctx.moveTo(cx, cy); ctx.lineTo(cx, cy + s / 2); }
+            if (d.e) { ctx.moveTo(cx, cy); ctx.lineTo(cx + s / 2, cy); }
+            if (d.w) { ctx.moveTo(cx, cy); ctx.lineTo(cx - s / 2, cy); }
+          }
+          ctx.stroke();
+        } 
         // Icons composite in RE space; geom is linear so they align with the
         // viewBox-scaled chrome.
         try { if (lastRooms) compositeIcons(lastRooms, RE); } catch (e) { post("render_err:composite " + (e.message||e)); }
@@ -427,6 +482,7 @@
       }
       if (c.startsWith("rooms:")) { try { lastRooms = JSON.parse(c.slice(6)); } catch (_) { return; } repaint(); return; }
       if (c.startsWith("held_keys:")) { heldKeys = new Set(c.slice(10).split(",").filter(Boolean)); repaint(); return; }
+      if (c.startsWith("camera_angle:")) { cameraAngle = parseFloat(c.slice(13)); repaint(); return; }
       if (c.startsWith("key_mesh:")) {
         for (const ln of c.slice(9).split("\n")) { const p = ln.split("|"); if (p.length!==5) continue;
           const [name,swS,shS,mvpS,ptsS] = p;
