@@ -14,7 +14,7 @@
 
 - In Bolt's plugin manager, install from URL:
 
-  `https://raw.githubusercontent.com/jscherf316/Bolt-DG/main/meta.json`
+  `https://raw.githubusercontent.com/nolanlebid1-tech/Bolt-DG/main/meta.json`
 
 - Drag the three capture zones for MAP, KEYBAG, and WORLD MAP over the
   in-game DG map, keybag, and world map icon respectively.
