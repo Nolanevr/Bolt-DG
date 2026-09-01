@@ -4539,6 +4539,19 @@ local function key_icon(name)
 end
 
 bolt.onswapbuffers(function (event)
+  -- --- NEW: Camera angle for the FOV cone ---
+  local pp = bolt.playerposition()
+  if pp and SET.line.cam_x then
+    local px, py, pz = pp:get()
+    local dx = px - SET.line.cam_x
+    local dz = pz - SET.line.cam_z
+    local angle_rad = math.atan2(dx, dz)
+    local angle_deg = math.floor((math.deg(angle_rad) + 360) % 360)
+    if rooms_browser then
+      rooms_browser:sendmessage("camera_angle:" .. tostring(angle_deg))
+    end
+  end
+  -- ------------------------------------------
   -- Invalidate the per-frame onrender3d cache (view-proj/camera/player pos) so
   -- the next frame's first mesh recomputes them. Swap runs after the frame's
   -- 3D passes, so clearing here is safe.
