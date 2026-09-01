@@ -243,7 +243,17 @@
     const roomInfo = (r) => {
       const kind = bodyKind(r.images);
       let body = null;
-      for (const n of r.images) if (n.startsWith("UNOPENED_")||n.startsWith("2WAY_")||n.startsWith("3WAY_")||n==="4WAY"||n.startsWith("DE_")||n.startsWith("ICON_BASE")||n.startsWith("ICON_BOSS")) { body=n; break; }
+      // Prefer structural shape over base/boss so doors map correctly
+      for (const n of r.images) {
+        if (n.startsWith("UNOPENED_") || n.startsWith("2WAY_") || n.startsWith("3WAY_") || n === "4WAY" || n.startsWith("DE_")) {
+          body = n; break;
+        }
+      }
+      // Fallback to base/boss if no structural shape is found
+      if (!body) {
+        for (const n of r.images) { if (n === "ICON_BASE" || n === "ICON_BOSS") { body = n; break; } }
+      }
+      
       let canOpen=false, hasKeyblock=false;
       if (kind==="unopened") for (const n of r.images) {
         const l=n.toLowerCase();
@@ -364,7 +374,7 @@
         for (const n of d.players) {
           if (n === "PLAYER_RED") {
             const s = PLAYER_SLOTS[n] || 1, p = pos[s];
-            const angleRad = ((window.cameraAngle || 0) - 90) * (Math.PI / 180); 
+            const angleRad = ((cameraAngle || 0) - 90) * (Math.PI / 180); 
             const fov = Math.PI / 2.5; 
             const radius = 0.8 * g.cell; 
             ctx.beginPath();
