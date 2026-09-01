@@ -117,8 +117,10 @@
       .cell.unopened .corridor.s{background-image:linear-gradient(to bottom,rgba(0,0,0,0.6),transparent 65%);}
       .cell.unopened .corridor.e{background-image:linear-gradient(to right,rgba(0,0,0,0.6),transparent 65%);}
       .cell.unopened .corridor.w{background-image:linear-gradient(to left,rgba(0,0,0,0.6),transparent 65%);}
-      .cell.key-held{border-color:#33ff33 !important; border-style:solid !important;}
-      .cell.key-missing{border-color:#ff0000 !important; border-style:solid !important;}
+      .cell.par-crit.key-held{border-color:#33ff33 !important; border-style:solid !important;}
+      .cell.par-crit.key-missing{border-color:#ff0000 !important; border-style:solid !important;}
+      .cell.par-unknown.key-held{border-color:#e6e6e6 !important; border-style:solid !important;}
+      .cell.par-unknown.key-missing{border-color:#ff8800 !important; border-style:solid !important;}
       .cell.par-bonus.key-held{border-color:#1e8c1e !important; border-style:solid !important;}
       .cell.par-bonus.key-missing{border-color:#b30000 !important; border-style:solid !important;}
       .unopened-question{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
@@ -356,25 +358,22 @@
       for (const d of playerDraws) {
         const ins = 0.2*g.cell;
         const pos = { 1:[d.x0+ins,d.y0+ins], 2:[d.x0+g.cell-ins,d.y0+ins], 3:[d.x0+ins,d.y0+g.cell-ins],
-                      4:[d.x0+g.cell-ins,d.y0+g.cell-ins], 5:[d.x0+g.cell/2,d.y0+g.cell/2] };  // 4 = BR, 5 = centre
+                      4:[d.x0+g.cell-ins,d.y0+g.cell-ins], 5:[d.x0+g.cell/2,d.y0+g.cell/2] };  
         
-        // --- NEW: Visual Camera FOV Cone ---
+        // --- Visual Camera FOV Cone ---
         for (const n of d.players) {
           if (n === "PLAYER_RED") {
             const s = PLAYER_SLOTS[n] || 1, p = pos[s];
-            // Shift -90 degrees because Canvas 0 is East, while Game 0 is North
-            const angleRad = (cameraAngle - 90) * (Math.PI / 180); 
-            const fov = Math.PI / 2.5; // ~72 degree vision cone
+            const angleRad = ((window.cameraAngle || 0) - 90) * (Math.PI / 180); 
+            const fov = Math.PI / 2.5; 
             const radius = 0.8 * g.cell; 
-
             ctx.beginPath();
             ctx.moveTo(p[0], p[1]);
             ctx.arc(p[0], p[1], radius, angleRad - fov/2, angleRad + fov/2);
             ctx.closePath();
-            
-            ctx.fillStyle = "rgba(0, 255, 255, 0.35)"; // Translucent light blue
+            ctx.fillStyle = "rgba(0, 255, 255, 0.35)"; 
             ctx.fill();
-            ctx.strokeStyle = "rgba(0, 255, 255, 0.85)"; // Solid light blue edges
+            ctx.strokeStyle = "rgba(0, 255, 255, 0.85)"; 
             ctx.lineWidth = 1.5;
             ctx.stroke();
           }
@@ -418,31 +417,27 @@
         ctx.moveTo(RE / 2, 0); ctx.lineTo(RE / 2, RE);
         ctx.moveTo(0, RE / 2); ctx.lineTo(RE, RE / 2);
         ctx.stroke();
-       // --- NEW: Light blue corridor lines ---
+       // --- Light blue corridor lines ---
         if (lastRooms) {
           ctx.strokeStyle = "rgba(0, 255, 255, 0.9)"; 
-          ctx.lineWidth = Math.max(2, 3 * (RE / EDGE)); // 2-3px scaled
+          ctx.lineWidth = Math.max(2, 3 * (RE / EDGE));
           ctx.lineCap = "square";
           ctx.beginPath();
-          
           const p = gE.pad * (RE / EDGE), s = gE.step * (RE / EDGE), c = gE.cell * (RE / EDGE);
-          
           for (const r of lastRooms) {
             if (r.gx < 0 || r.gx > 7 || r.gz < 0 || r.gz > 7) continue;
             const info = roomInfo(r);
             if (!info.body) continue; 
-            
             const d = parseDoors(info.body);
             const cx = p + r.gx * s + c / 2;
             const cy = p + r.gz * s + c / 2;
-            
             if (d.n) { ctx.moveTo(cx, cy); ctx.lineTo(cx, cy - s / 2); }
             if (d.s) { ctx.moveTo(cx, cy); ctx.lineTo(cx, cy + s / 2); }
             if (d.e) { ctx.moveTo(cx, cy); ctx.lineTo(cx + s / 2, cy); }
             if (d.w) { ctx.moveTo(cx, cy); ctx.lineTo(cx - s / 2, cy); }
           }
           ctx.stroke();
-        } 
+        }
         // Icons composite in RE space; geom is linear so they align with the
         // viewBox-scaled chrome.
         try { if (lastRooms) compositeIcons(lastRooms, RE); } catch (e) { post("render_err:composite " + (e.message||e)); }

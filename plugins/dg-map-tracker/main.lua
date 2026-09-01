@@ -4219,12 +4219,40 @@ bolt.onrendergameview(function (event)
       -- Outline colour by the parity of the room the door LEADS TO: proven
       -- bonus -> gray, crit -> green, still unknown -> yellow.
       local function door_color(cgx, cgz, dir)
-        local d = NEI_DELTA[dir]
-        local p = parity_state[(cgx + d[1]) .. "," .. (cgz + d[2])]
-        if p == "bonus" then return "gray"
-        elseif p == "crit" then return "green"
-        else return "yellow" end
-      end
+                local d = NEI_DELTA[dir]
+                local target_ck = (cgx + d[1]) .. "," .. (cgz + d[2])
+                local p = parity_state[target_ck]
+                local nc = rooms_by_cell[target_ck]
+                
+                if nc then
+                  local is_unopened = false
+                  local keyname = nil
+                  for _, nm in ipairs(nc.images) do
+                    if nm:sub(1, 9) == "UNOPENED_" then is_unopened = true
+                    else 
+                      local k = key_lower(nm)
+                      if k then keyname = k end 
+                    end
+                  end
+                  
+                  if is_unopened and keyname then
+                    local is_held = S.keybag_state[keyname] and (S.keybag_tick - S.keybag_state[keyname] <= 60)
+                    if is_held then
+                      if p == "bonus" then return "dark_green"
+                      elseif p == "crit" then return "bright_green"
+                      else return "white" end
+                    else
+                      if p == "bonus" then return "dark_red"
+                      elseif p == "crit" then return "bright_red"
+                      else return "orange" end
+                    end
+                  end
+                end
+                
+                if p == "bonus" then return "gray"
+                elseif p == "crit" then return "green"
+                else return "yellow" end
+              end
       -- Guardian door: neighbour is an unopened QUESTION room (guardian doors
       -- only entrance those) AND a detected guardian mesh sits near this door's
       -- wall centre (forward-match against S.guardian_seen, sticky per floor).
@@ -4298,14 +4326,12 @@ bolt.onrendergameview(function (event)
                 if FRONT[dir] then
                   local style = chevron_style(cgx, cgz, dir)
                   local color = door_color(cgx, cgz, dir)
-                  -- Override parity color if this specific door is the guardian
+                  
+                  -- OVERRIDE for Guardian Doors
                   if guardian_door(cgx, cgz, dir, rtx, rtz) then
                     color = "guardian_magenta"
                   end
-                  -- Openability distinction (solid vs corner brackets) is PARKED:
-                  -- draw the C solid regardless. `style` still carries
-                  -- "solid"/"brackets" and the bracket renderer is intact -- swap
-                  -- `"solid"` back to `style` to re-enable it.
+
                   local tiles = style and CSHAPE[dir] or FRONT[dir]
                   shapes[#shapes + 1] = { tiles = tiles, mode = "solid", color = color, red = room_guard }
                 end
@@ -4398,11 +4424,19 @@ bolt.onrendergameview(function (event)
           end
         end
         local COLORS = {
-          { "gray",   0.62, 0.62, 0.62 },
-          { "green",  0.25, 0.90, 0.35 },
-          { "yellow", 1.00, 0.90, 0.15 },
-          { "guardian_magenta", 1.00, 0.15, 0.90 }, -- Unique Guardian Door color
-          { "red",    1.00, 0.15, 0.15 },   -- guardian-room 2nd outline, drawn last
+          { "gray",             0.62, 0.62, 0.62 },
+          { "green",            0.25, 0.90, 0.35 }, -- Standard crit path
+          { "yellow",           1.00, 0.90, 0.15 }, -- Unknown parity
+          { "guardian_magenta", 1.00, 0.15, 0.90 }, -- Guardian Door
+          { "red",              1.00, 0.15, 0.15 }, -- Guardian 2nd outline
+          
+          -- KEY DOOR COLORS
+          { "bright_green",     0.20, 1.00, 0.20 }, -- Held key (crit)
+          { "bright_red",       1.00, 0.10, 0.10 }, -- Missing key (crit)
+          { "dark_green",       0.12, 0.55, 0.12 }, -- Held key (bonus)
+          { "dark_red",         0.70, 0.00, 0.00 }, -- Missing key (bonus)
+          { "white",            0.90, 0.90, 0.90 }, -- Held key (unknown)
+          { "orange",           1.00, 0.55, 0.00 }, -- Missing key (unknown)
         }
         -- Fills FIRST, each matching its outline colour, UNDER the lines (a touch
         -- lower so the outline stays crisp on top).

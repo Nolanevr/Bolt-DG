@@ -236,13 +236,17 @@
   .cell.unopened .corridor.w {
     background-image: linear-gradient(to left, rgba(0,0,0,0.85), transparent 65%);
   }
-  /* Default (Crit / Unknown) - Bright Green and Bright Red */
-  .cell.key-held { border-color: #33ff33 !important; border-style: solid !important; }
-  .cell.key-missing { border-color: #ff0000 !important; border-style: solid !important; }
+  /* Crit Parity - Bright Green and Bright Red */
+  .cell.par-crit.key-held{border-color:#33ff33 !important; border-style:solid !important;}
+  .cell.par-crit.key-missing{border-color:#ff0000 !important; border-style:solid !important;}
+  
+  /* Unknown Parity - White and Orange */
+  .cell.par-unknown.key-held{border-color:#e6e6e6 !important; border-style:solid !important;}
+  .cell.par-unknown.key-missing{border-color:#ff8800 !important; border-style:solid !important;}
   
   /* Bonus Parity - Darker Green and Darker Red */
-  .cell.par-bonus.key-held { border-color: #1e8c1e !important; border-style: solid !important; }
-  .cell.par-bonus.key-missing { border-color: #b30000 !important; border-style: solid !important; }
+  .cell.par-bonus.key-held{border-color:#1e8c1e !important; border-style:solid !important;}
+  .cell.par-bonus.key-missing{border-color:#b30000 !important; border-style:solid !important;}
 
   .doors { position: absolute; inset: 0; pointer-events: none; z-index: 0; }
   .overlays {
