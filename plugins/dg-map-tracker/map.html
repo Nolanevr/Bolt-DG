@@ -91,10 +91,10 @@
     //      fixed-px borders/shadows, %-based grid). {FONT} is substituted with
     //      the computed ? font size for the current edge. --------------------
     const CHROME_CSS = `
-      :root{--cell-empty:#000;--cell-body:#7a5a2a;--cell-base:#7a5a2a;--cell-boss:#8a2a2a;
-        --cell-unopened:#7a5a2a;--par-unknown:#2e230d;--par-bonus:#24190d;--par-crit:#dab260;--accent:#ffcf6b;}
+      :root{--cell-empty:rgba(0,0,0,0.65);--cell-body:#916c33;--cell-base:#916c33;--cell-boss:#8a2a2a;
+        --cell-unopened:#3b2812;--par-unknown:#2e230d;--par-bonus:#24190d;--par-crit:#dab260;--accent:#ffcf6b;}
       *{box-sizing:border-box;}
-      .grid{position:relative;background:#000;display:grid;
+      .grid{position:relative;background:rgba(0,0,0,0.65);display:grid;
         grid-template-columns:repeat(8,1fr);grid-template-rows:repeat(8,1fr);gap:1.3%;padding:1.3%;}
       .cell{background:var(--cell-empty);border:3px solid transparent;border-radius:3px;
         position:relative;overflow:visible;}
@@ -111,18 +111,17 @@
       .cell.par-unknown{border-color:var(--par-unknown);}
       .cell.par-bonus{border-color:var(--par-bonus);}
       .cell.par-crit{border-color:var(--par-crit);border-style:double;}
-      .cell.par-bonus.body,.cell.par-bonus.base,.cell.par-bonus.boss,.cell.par-bonus.unopened{background:#5c4728;}
+      .cell.par-bonus.body,.cell.par-bonus.base,.cell.par-bonus.boss{background:#6b522b;}
+      .cell.par-bonus.unopened{background:#281b0a;}
       .cell.par-crit.body,.cell.par-crit.base,.cell.par-crit.boss,.cell.par-crit.unopened{background:#a67c38;}
       .cell.unopened .corridor.n{background-image:linear-gradient(to top,rgba(0,0,0,0.6),transparent 65%);}
       .cell.unopened .corridor.s{background-image:linear-gradient(to bottom,rgba(0,0,0,0.6),transparent 65%);}
       .cell.unopened .corridor.e{background-image:linear-gradient(to right,rgba(0,0,0,0.6),transparent 65%);}
       .cell.unopened .corridor.w{background-image:linear-gradient(to left,rgba(0,0,0,0.6),transparent 65%);}
-      .cell.par-crit.key-held{border-color:#33ff33 !important; border-style:solid !important;}
-      .cell.par-crit.key-missing{border-color:#ff0000 !important; border-style:solid !important;}
-      .cell.par-unknown.key-held{border-color:#e6e6e6 !important; border-style:solid !important;}
-      .cell.par-unknown.key-missing{border-color:#ff8800 !important; border-style:solid !important;}
-      .cell.par-bonus.key-held{border-color:#1e8c1e !important; border-style:solid !important;}
-      .cell.par-bonus.key-missing{border-color:#b30000 !important; border-style:solid !important;}
+      .cell.par-crit.key-held, .cell.par-unknown.key-held {border-color:#33ff33 !important; border-style:solid !important;}
+      .cell.par-crit.key-missing, .cell.par-unknown.key-missing {border-color:#ff0000 !important; border-style:solid !important;}
+      .cell.par-bonus.key-held {border-color:#1e8c1e !important; border-style:solid !important;}
+      .cell.par-bonus.key-missing {border-color:#b30000 !important; border-style:solid !important;}
       .unopened-question{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
         font-family:'Trebuchet MS',sans-serif;font-weight:900;font-size:{FONT}px;line-height:1;
         color:var(--accent);text-shadow:0 0 4px rgba(0,0,0,0.9),0 1px 2px rgba(0,0,0,0.9);}
@@ -195,8 +194,23 @@
           if (w0<0||w1<0||w2<0) continue;
           const z=w0*v0.z+w1*v1.z+w2*v2.z, off=y*rw+x; if (z>=zbuf[off]) continue;
           zbuf[off]=z; const po=off*4;
-          px[po]=(w0*v0.r+w1*v1.r+w2*v2.r)*shade; px[po+1]=(w0*v0.g+w1*v1.g+w2*v2.g)*shade;
-          px[po+2]=(w0*v0.b+w1*v1.b+w2*v2.b)*shade; px[po+3]=255;
+          let pr = (w0*v0.r+w1*v1.r+w2*v2.r)*shade;
+            let pg = (w0*v0.g+w1*v1.g+w2*v2.g)*shade;
+            let pb = (w0*v0.b+w1*v1.b+w2*v2.b)*shade;
+
+            const lName = (name || "").toLowerCase();
+            if (lName === "group_gatestone") {
+              pb = Math.min(255, pb * 1.5); // Boost blue
+              pr *= 0.6; pg *= 0.7;         // Kill red/green
+            } else if (lName.startsWith("pgt_") || lName.includes("gate")) {
+              pg = Math.min(255, pg * 1.5); // Boost green
+              pr *= 0.6; pb *= 0.8;         // Kill red/blue
+            }
+
+            px[po] = pr; 
+            px[po+1] = pg; 
+            px[po+2] = pb; 
+            px[po+3] = 255;
         }
       }
       const out=new Uint8ClampedArray(outW*outH*4), NSUB=SS*SS;
@@ -373,17 +387,21 @@
         // --- Visual Camera FOV Cone ---
         for (const n of d.players) {
           if (n === "PLAYER_RED") {
-            const s = PLAYER_SLOTS[n] || 1, p = pos[s];
+            // Re-calculate the center of the room
+            const cx = d.x0 + g.cell / 2;
+            const cy = d.y0 + g.cell / 2;
+            
             const angleRad = ((cameraAngle || 0) - 90) * (Math.PI / 180); 
             const fov = Math.PI / 2.5; 
-            const radius = 0.8 * g.cell; 
+            const radius = 1.2 * g.cell; 
+            
             ctx.beginPath();
-            ctx.moveTo(p[0], p[1]);
-            ctx.arc(p[0], p[1], radius, angleRad - fov/2, angleRad + fov/2);
+            ctx.moveTo(cx, cy);
+            ctx.arc(cx, cy, radius, angleRad - fov/2, angleRad + fov/2);
             ctx.closePath();
-            ctx.fillStyle = "rgba(0, 255, 255, 0.35)"; 
+            ctx.fillStyle = "rgba(0, 255, 255, 0.30)"; 
             ctx.fill();
-            ctx.strokeStyle = "rgba(0, 255, 255, 0.85)"; 
+            ctx.strokeStyle = "rgba(0, 255, 255, 0.70)"; 
             ctx.lineWidth = 1.5;
             ctx.stroke();
           }
@@ -398,69 +416,83 @@
 
     // ---- full render: chrome via FO (async), then icons, then export --------
     let rendering = false, dirty = false;
+    let cachedSvgImg = null;
+
+    const drawMapLayers = (img) => {
+      const E = EDGE, RE = renderEdge(), gE = geom(E);
+      ctx.clearRect(0, 0, SURF, SURF);
+      if (deadReason) { ctx.fillStyle = "#6e0f0f"; ctx.fillRect(0, 0, RE, RE); }
+      ctx.drawImage(img, 0, 0, RE, RE);
+      
+      ctx.filter = "none";
+      ctx.strokeStyle = "rgba(255,255,255,0.05)";
+      ctx.lineWidth = Math.max(1, RE / EDGE);
+      ctx.beginPath();
+      ctx.moveTo(RE / 2, 0); ctx.lineTo(RE / 2, RE);
+      ctx.moveTo(0, RE / 2); ctx.lineTo(RE, RE / 2);
+      ctx.stroke();
+
+      if (lastRooms) {
+        ctx.strokeStyle = "rgba(0, 255, 255, 0.8)"; 
+        ctx.lineWidth = Math.max(1, 1.5 * (RE / EDGE));
+        ctx.lineCap = "square";
+        ctx.beginPath();
+        const p = gE.pad * (RE / EDGE), s = gE.step * (RE / EDGE), c = gE.cell * (RE / EDGE);
+        for (const r of lastRooms) {
+          if (r.gx < 0 || r.gx > 7 || r.gz < 0 || r.gz > 7) continue;
+          const info = roomInfo(r);
+          if (!info.body) continue; 
+          const d = parseDoors(info.body);
+          const cx = p + r.gx * s + c / 2;
+          const cy = p + r.gz * s + c / 2;
+          if (d.n) { ctx.moveTo(cx, cy); ctx.lineTo(cx, cy - s / 2); }
+          if (d.s) { ctx.moveTo(cx, cy); ctx.lineTo(cx, cy + s / 2); }
+          if (d.e) { ctx.moveTo(cx, cy); ctx.lineTo(cx + s / 2, cy); }
+          if (d.w) { ctx.moveTo(cx, cy); ctx.lineTo(cx - s / 2, cy); }
+        }
+        ctx.stroke();
+      }
+
+      try { if (lastRooms) compositeIcons(lastRooms, RE); } catch (e) { post("render_err:composite " + (e.message||e)); }
+      try {
+        const data = ctx.getImageData(0, 0, RE, RE).data;
+        const hdr = "px:" + RE + "|";
+        const msg = new Uint8Array(hdr.length + data.length);
+        for (let i = 0; i < hdr.length; i++) msg[i] = hdr.charCodeAt(i);
+        msg.set(data, hdr.length);
+        fetch("https://bolt-api/send-message", { method:"POST", body: msg }).catch(()=>{});
+      } catch (e) { post("render_err:getImageData " + (e.message||e)); }
+    };
+
+    let fastPending = false;
+    const fastRepaint = () => {
+      if (cachedSvgImg && !rendering) {
+        if (!fastPending) {
+          fastPending = true;
+          requestAnimationFrame(() => {
+            fastPending = false;
+            drawMapLayers(cachedSvgImg);
+          });
+        }
+      } else if (!rendering) {
+        repaint();
+      }
+    };
+
     const doRender = () => {
       if (rendering) { dirty = true; return; }
       rendering = true; dirty = false;
-      const E = EDGE;                     // logical (chrome authored here)
-      const RE = renderEdge();            // pixels (canvas / rasterised at DPR)
-      const gE = geom(E);
-      // ? is 85cqw = 85% of the content box (~cell-10) ~= 0.65*cell.
+      const E = EDGE, RE = renderEdge(), gE = geom(E);
       const css = CHROME_CSS.replace("{FONT}", (0.646 * gE.cell).toFixed(1));
       const chrome = lastRooms ? buildChromeHTML(lastRooms, E) : ('<div class="grid" style="width:'+E+'px;height:'+E+'px"></div>');
-      // viewBox maps the E-unit content onto an RE-px raster, so borders/text
-      // stay authored-size but rasterise crisply at device resolution.
       const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="'+RE+'" height="'+RE+'" viewBox="0 0 '+E+' '+E+'">' +
         '<foreignObject width="'+E+'" height="'+E+'">' +
         '<div xmlns="http://www.w3.org/1999/xhtml" style="font-family:\'Trebuchet MS\',sans-serif">' +
         '<style><![CDATA[' + css + ']]></style>' + chrome + '</div></foreignObject></svg>';
       const img = new Image();
       img.onload = () => {
-        ctx.clearRect(0, 0, SURF, SURF);
-        if (deadReason) { ctx.fillStyle = "#6e0f0f"; ctx.fillRect(0, 0, RE, RE); }
-        ctx.drawImage(img, 0, 0, RE, RE);
-        // Very faint quadrant guide lines through the map midpoints (splits the
-        // 8x8 into four 4x4 quadrants). Drawn under the icons.
-        ctx.filter = "none";
-        ctx.strokeStyle = "rgba(255,255,255,0.05)";
-        ctx.lineWidth = Math.max(1, RE / EDGE);       // ~1 logical px
-        ctx.beginPath();
-        ctx.moveTo(RE / 2, 0); ctx.lineTo(RE / 2, RE);
-        ctx.moveTo(0, RE / 2); ctx.lineTo(RE, RE / 2);
-        ctx.stroke();
-       // --- Light blue corridor lines ---
-        if (lastRooms) {
-          ctx.strokeStyle = "rgba(0, 255, 255, 0.9)"; 
-          ctx.lineWidth = Math.max(2, 3 * (RE / EDGE));
-          ctx.lineCap = "square";
-          ctx.beginPath();
-          const p = gE.pad * (RE / EDGE), s = gE.step * (RE / EDGE), c = gE.cell * (RE / EDGE);
-          for (const r of lastRooms) {
-            if (r.gx < 0 || r.gx > 7 || r.gz < 0 || r.gz > 7) continue;
-            const info = roomInfo(r);
-            if (!info.body) continue; 
-            const d = parseDoors(info.body);
-            const cx = p + r.gx * s + c / 2;
-            const cy = p + r.gz * s + c / 2;
-            if (d.n) { ctx.moveTo(cx, cy); ctx.lineTo(cx, cy - s / 2); }
-            if (d.s) { ctx.moveTo(cx, cy); ctx.lineTo(cx, cy + s / 2); }
-            if (d.e) { ctx.moveTo(cx, cy); ctx.lineTo(cx + s / 2, cy); }
-            if (d.w) { ctx.moveTo(cx, cy); ctx.lineTo(cx - s / 2, cy); }
-          }
-          ctx.stroke();
-        }
-        // Icons composite in RE space; geom is linear so they align with the
-        // viewBox-scaled chrome.
-        try { if (lastRooms) compositeIcons(lastRooms, RE); } catch (e) { post("render_err:composite " + (e.message||e)); }
-        try {
-          const data = ctx.getImageData(0, 0, RE, RE).data;
-          // "px:<RE>|" header + raw RGBA. Lua uses RE as the source region size;
-          // it draws that to the (smaller) logical edge on screen.
-          const hdr = "px:" + RE + "|";
-          const msg = new Uint8Array(hdr.length + data.length);
-          for (let i = 0; i < hdr.length; i++) msg[i] = hdr.charCodeAt(i);
-          msg.set(data, hdr.length);
-          fetch("https://bolt-api/send-message", { method:"POST", body: msg }).catch(()=>{});
-        } catch (e) { post("render_err:getImageData " + (e.message||e)); }
+        cachedSvgImg = img;
+        drawMapLayers(img);
         rendering = false;
         if (dirty) doRender();
       };
@@ -487,7 +519,7 @@
       }
       if (c.startsWith("rooms:")) { try { lastRooms = JSON.parse(c.slice(6)); } catch (_) { return; } repaint(); return; }
       if (c.startsWith("held_keys:")) { heldKeys = new Set(c.slice(10).split(",").filter(Boolean)); repaint(); return; }
-      if (c.startsWith("camera_angle:")) { cameraAngle = parseFloat(c.slice(13)); repaint(); return; }
+      if (c.startsWith("camera_angle:")) { cameraAngle = parseFloat(c.slice(13)); fastRepaint(); return; }
       if (c.startsWith("key_mesh:")) {
         for (const ln of c.slice(9).split("\n")) { const p = ln.split("|"); if (p.length!==5) continue;
           const [name,swS,shS,mvpS,ptsS] = p;

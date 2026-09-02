@@ -3604,8 +3604,12 @@ bolt.onrender3d(function (event)
     if pp then f3d.px, f3d.py, f3d.pz = pp:get() end
     S.f3d = f3d
     sr_view_proj = f3d.vp
-    if f3d.cx then SET.line.cam_x, SET.line.cam_y, SET.line.cam_z = f3d.cx, f3d.cy, f3d.cz end
-  end
+    if f3d.cx and f3d.px then 
+          -- Prevent UI/Skybox cameras from hijacking the angle
+          if (math.abs(f3d.cx - f3d.px) + math.abs(f3d.cz - f3d.pz)) < 15000 then
+            SET.line.cam_x, SET.line.cam_y, SET.line.cam_z = f3d.cx, f3d.cy, f3d.cz 
+          end
+        end
   -- Scan-frame gate FIRST: 11/12 frames are non-scan, so return here with the
   -- fewest per-mesh ops. The detection below is all of STATIC things
   -- (resources / ground keys don't move), so the shared ~5Hz cadence loses
@@ -4239,12 +4243,10 @@ bolt.onrendergameview(function (event)
                     local is_held = S.keybag_state[keyname] and (S.keybag_tick - S.keybag_state[keyname] <= 60)
                     if is_held then
                       if p == "bonus" then return "dark_green"
-                      elseif p == "crit" then return "bright_green"
-                      else return "white" end
+                      else return "bright_green" end
                     else
                       if p == "bonus" then return "dark_red"
-                      elseif p == "crit" then return "bright_red"
-                      else return "orange" end
+                      else return "bright_red" end
                     end
                   end
                 end
@@ -4356,8 +4358,8 @@ bolt.onrendergameview(function (event)
         -- door leads to). Merged perimeter: draw a tile edge only when the
         -- neighbouring tile is NOT in the same shape (no internal lines). Corner
         -- brackets: a tick along each boundary edge at every corner.
-        local buckets = { gray = {}, green = {}, yellow = {}, guardian_magenta = {}, red = {} }
-        local fills   = { gray = {}, green = {}, yellow = {}, guardian_magenta = {}, red = {} }   -- per-colour tile fills
+        local buckets = { gray = {}, green = {}, yellow = {}, guardian_magenta = {}, red = {}, bright_green = {}, bright_red = {}, dark_green = {}, dark_red = {}, white = {}, orange = {} }
+        local fills   = { gray = {}, green = {}, yellow = {}, guardian_magenta = {}, bright_green = {}, bright_red = {}, dark_green = {}, dark_red = {}, white = {}, orange = {} }
         for _, sh in ipairs(shapes) do
           local quads = buckets[sh.color]
           local fillq = fills[sh.color]
@@ -4581,10 +4583,12 @@ bolt.onswapbuffers(function (event)
     local dz = pz - SET.line.cam_z
     local angle_rad = math.atan2(dx, dz)
     local angle_deg = math.floor((math.deg(angle_rad) + 360) % 360)
-    if rooms_browser then
+    if rooms_browser and angle_deg ~= S.last_camera_angle then
+      S.last_camera_angle = angle_deg
       rooms_browser:sendmessage("camera_angle:" .. tostring(angle_deg))
     end
   end
+  -- ------------------------------------------
   -- ------------------------------------------
   -- Invalidate the per-frame onrender3d cache (view-proj/camera/player pos) so
   -- the next frame's first mesh recomputes them. Swap runs after the frame's
