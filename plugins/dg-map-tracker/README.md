@@ -82,6 +82,17 @@ sticks; an `exact` hit still binds on sight. Detection also runs every
 frame and is not culled by the resource scan range -- a guardian door
 is room structure, not scenery you walk up to.
 
+## Camera FOV cone
+
+The white wedge on the map panel shows which way the camera is facing. It is a
+compass bearing pushed from Lua (0 = north, 90 = east); when no bearing has
+arrived yet the map draws **no cone at all** rather than one pointing north,
+because 0 is a real direction and a confident wrong answer is worse than none.
+
+**Camera FOV cone** in the settings panel (default on) turns it off. Off also
+stops the per-frame angle push and the repaints it triggers, so it is a real
+cost saving and not just a visual one -- see Map render cost below.
+
 ## Next-door hint
 
 With **Next-door hint** on (settings panel, default on), the frontier door the
