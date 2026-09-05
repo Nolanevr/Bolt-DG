@@ -860,6 +860,195 @@ end
               all(g.fb(k, n) is None for nm, n, k in tiny),
               'matched: ' + ', '.join(nm for nm, n, k in tiny))
 
+    # ---- guardian-door matcher: must survive entity-border highlighting ------
+    # A guardian door was identified by ABSOLUTE vertex colour equality, so with
+    # RuneScape's entity-border highlighting on, a highlighted door -- repainted
+    # by the border pass, or handed to us as the border's own inflated copy of
+    # the mesh -- scored past the cutoff and the door simply went unread. The
+    # shipped matcher now leads with geometry and lets colour corroborate:
+    # tier 1 is the original strict test, tier 2 accepts colours that match up
+    # to a per-channel gain+offset, tier 3 accepts geometry alone once the
+    # border has left no colour signal at all.
+    #
+    # These run the SHIPPED scorer over the SHIPPED catalog and assert both
+    # halves of that: every print survives the highlight transforms, and none of
+    # the tolerant tiers is loose enough to accept a mesh that is not the door.
+    print('\nguardian-door matcher (survives entity-border highlighting)')
+    lua.execute(extract(rsrc, 'local function pos_fit'))
+    lua.execute(extract(rsrc, 'local function colour_fit'))
+    g_tune = re.search(r'-- Guardian match tuning.*?\n\n', rsrc, re.S)
+    check('guardian tuning constants present', bool(g_tune))
+    if g_tune:
+        lua.execute(g_tune.group(0).replace('local G_', 'G_'))
+        lua.execute(extract(rsrc, 'local function parse_catalog_verts'))
+        lua.execute('RES = {}')
+        lua.execute(extract(rsrc, 'RES.guardian_hit = function'))
+        g.GUARD_TXT = io.open(os.path.join(HERE, os.pardir, 'data',
+                                           'guardian_doors.txt'),
+                              encoding='utf-8').read()
+        lua.execute('''
+guardian_by_n = {}
+GCAT = {}
+for line in GUARD_TXT:gmatch("[^\\r\\n]+") do
+  if not line:match("^%s*#") and not line:match("^%s*$") then
+    local name, _tier, rest = line:match("^%s*([%w_]+)|(%d+)|(.+)$")
+    if name and rest then
+      local n, verts = parse_catalog_verts(rest)
+      if n and verts and #verts >= 5 then
+        local vs = { verts[1], verts[2], verts[3], verts[4], verts[5] }
+        table.sort(vs, function (a, b) return a.y < b.y end)
+        guardian_by_n[n] = guardian_by_n[n] or {}
+        table.insert(guardian_by_n[n], { name = name, verts = vs })
+        GCAT[#GCAT + 1] = { name = name, n = n, verts = vs }
+      end
+    end
+  end
+end
+
+-- A fake bolt render event over a vertex list, exposing exactly the two
+-- accessors guardian_hit uses. `fn` rewrites each sampled vertex, which is how
+-- the highlight transforms below are applied to a print's own mesh.
+function fake_event(entry, fn)
+  local by = {}
+  local step = math.max(1, math.floor(entry.n / 6))
+  for i = 1, 5 do
+    local v = entry.verts[i]
+    local c = { x = v.x, y = v.y, z = v.z, r = v.r, g = v.g, b = v.b }
+    if fn then fn(c, i) end
+    by[math.min(entry.n, i * step)] = c
+  end
+  return {
+    vertexpoint = function (_, idx)
+      local v = by[idx]; if not v then return nil end
+      return { get = function () return v.x, v.y, v.z end }
+    end,
+    vertexcolour = function (_, idx)
+      local v = by[idx]; if not v then return nil end
+      return v.r / 255, v.g / 255, v.b / 255
+    end,
+  }
+end
+
+function clamp8(v) return math.max(0, math.min(255, math.floor(v + 0.5))) end
+
+-- Named highlight transforms. Every one of these is a shape the border pass can
+-- hand us for a door that IS a guardian, so every one of them must still match.
+XFORM = {
+  { "clean re-sight",              nil },
+  { "lighting drift +/-3",         function (c, i)
+      c.r = clamp8(c.r + (i % 2 == 0 and 3 or -3))
+      c.g = clamp8(c.g + 2); c.b = clamp8(c.b - 2) end },
+  { "border tint x1.6 +40",        function (c)
+      c.r = clamp8(c.r * 1.6 + 40); c.g = clamp8(c.g * 1.6 + 40)
+      c.b = clamp8(c.b * 1.6 + 40) end },
+  { "border tint x6 (clips at 255)", function (c)
+      c.r = clamp8(c.r * 6 + 50); c.g = clamp8(c.g * 6 + 50)
+      c.b = clamp8(c.b * 6 + 50) end },
+  { "single-channel bleed +120 GB", function (c)
+      c.g = clamp8(c.g + 120); c.b = clamp8(c.b + 120) end },
+  { "washed flat (no colour left)", function (c)
+      c.r, c.g, c.b = 235, 235, 235 end },
+  { "inflated outline copy x1.04", function (c)
+      c.x = math.floor(c.x * 1.04); c.y = math.floor(c.y * 1.04)
+      c.z = math.floor(c.z * 1.04)
+      c.r = clamp8(c.r * 1.4 + 30); c.g = clamp8(c.g * 1.4 + 30)
+      c.b = clamp8(c.b * 1.4 + 30) end },
+}
+
+-- Meshes that are NOT the door. Displacement is per-sample and grows with i, so
+-- these are not a uniform scale the fit could absorb.
+NEG = {
+  { "foreign mesh, same vertexcount", function (c, i)
+      c.x = c.x + 300 * i; c.y = c.y - 220 * i; c.z = c.z + 175 * i
+      c.r = clamp8(200 - 20 * i); c.g = clamp8(30 + 25 * i)
+      c.b = clamp8(120 + 9 * i) end },
+  { "wrong geometry, washed flat", function (c, i)
+      c.x = c.x + 140 * i; c.z = c.z - 160 * i
+      c.r, c.g, c.b = 240, 240, 240 end },
+  { "wrong geometry, plausible colours", function (c, i)
+      c.x = c.x - 90 * i; c.y = c.y + 110 * i; c.z = c.z + 130 * i end },
+  -- Boundary probe for the geometry-only tier: colours give it nothing, so the
+  -- position gate is the ONLY thing standing between this and a false door. A
+  -- gross displacement would prove little; 30 units per sample is close enough
+  -- to the gate that a quiet loosening of it shows up here.
+  { "flat colours, +/-30 units off print", function (c, i)
+      local d = (i % 2 == 0) and 30 or -30
+      c.x = c.x + d; c.z = c.z - d
+      c.r, c.g, c.b = 250, 250, 250 end },
+}
+
+function probe(entry, fn, n)
+  local name, score, mode = RES.guardian_hit(fake_event(entry, fn), n or entry.n)
+  return name, score or -1, mode or "-"
+end
+''')
+        gcat = list(g.GCAT.values())
+        check('%d guardian prints loaded into the shipped scorer' % len(gcat),
+              len(gcat) == 5, '%d loaded' % len(gcat))
+
+        # Every print must recover its own identity under every highlight shape.
+        for x in g.XFORM.values():
+            label, fn = x[1], x[2]
+            bad = []
+            for e in gcat:
+                nm, sc, md = g.probe(e, fn)
+                if nm != e.name:
+                    bad.append('%s (%s, %.0f)' % (e.name, md, sc))
+            check('%-32s -> all 5 prints still match' % label, not bad,
+                  'missed: ' + ', '.join(bad))
+
+        # ... and no tolerant tier may accept a mesh that is not the door.
+        for x in g.NEG.values():
+            label, fn = x[1], x[2]
+            bad = []
+            for e in gcat:
+                nm, sc, md = g.probe(e, fn)
+                if nm is not None:
+                    bad.append('%s (%s, %.0f)' % (e.name, md, sc))
+            check('%-32s -> rejected for all 5 prints' % label, not bad,
+                  'accepted: ' + ', '.join(bad))
+
+        # Cross-print: one print's mesh offered against another's bucket. The
+        # counts differ so the bucket gate alone rejects, but assert it -- the
+        # tolerant tiers lean on that gate being real.
+        cross = []
+        for a in gcat:
+            for b in gcat:
+                if a.name != b.name and g.probe(a, None, b.n)[0] is not None:
+                    cross.append('%s matched as %s' % (a.name, b.name))
+        check('no print matches another print\'s bucket', not cross,
+              '; '.join(cross))
+
+        # The exclusivity the unconditional return in main.lua depends on: if
+        # any other catalog shared a guardian vertexcount, that return would
+        # swallow it before its own matcher ever saw it.
+        gns = set(int(e.n) for e in gcat)
+        clash = []
+        for fname in ('resources.txt', 'icons_data.txt', 'ghosts.txt'):
+            path = os.path.join(HERE, os.pardir, 'data', fname)
+            if not os.path.exists(path):
+                continue
+            for line in io.open(path, encoding='utf-8'):
+                if line.startswith('#') or not line.strip():
+                    continue
+                parts = line.split('|')
+                for fld in parts[1:3]:
+                    if fld.strip().isdigit() and int(fld) in gns:
+                        clash.append('%s: %s' % (fname, parts[0]))
+        check('guardian vertexcounts %s are exclusive'
+              % ','.join(str(n) for n in sorted(gns)), not clash,
+              'shared by ' + ', '.join(sorted(set(clash))))
+
+        # Static guards on the main.lua side of the same change.
+        check('guardian scan runs ahead of the resource scan-range cull',
+              src.index('==== GUARDIAN DOORS') < src.index('SCAN_RANGE_TILES = 1 means'))
+        check('guardian-n meshes never fall through to the resource matcher',
+              'RETURN whether or not the fingerprint matched' in src)
+        check('tolerant hits need a second-frame confirm before sticking',
+              'S.guardian_pend[gk] ~= f3d' in src and 'gmode == "exact"' in src)
+        check('guardian confirm state is wiped with the floor',
+              'S.guardian_pend      = nil' in src)
+
     print('\n%s  (%d failed)' % ('ALL GREEN' if not FAILS else 'FAILURES: ' + ', '.join(FAILS),
                                  len(FAILS)))
     return 1 if FAILS else 0

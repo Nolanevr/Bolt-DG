@@ -661,9 +661,128 @@ reload_guardians()
 
 -- True if a mesh's vertexcount could be a guardian (cheap gate before sampling).
 RES.guardian_n = function (n) return guardian_by_n[n] ~= nil end
--- Strict fingerprint match: returns the guardian name (e.g. GUARDIAN_DOOR_3) or
--- nil. Same metric as the ground-key matcher (pos L1 + summed colour), tight
--- cutoff -- a real guardian re-sight scores ~0 against its own floor's print.
+
+-- Guardian match tuning. Geometry first, colour second -- see guardian_hit.
+local G_EXACT_CUT  = 300    -- pos + 2*col, the original strict test
+local G_POS_TINT   = 150    -- scale-fitted position residual, tinted tier
+local G_POS_FLOOD  = 80     -- ... flooded tier (colour carries nothing)
+local G_SHAPE_CUT  = 55     -- colour residual per usable channel, gain+offset fit
+local G_CH_SPREAD  = 10     -- live range below which a channel says nothing at all
+local G_CH_MIN_PTS = 3      -- unclipped samples a channel needs to be worth fitting
+local G_GAIN_LO    = 0.20   -- plausible tint gains; outside this the colours are
+local G_GAIN_HI    = 5.00   -- not a lit version of the print, they are a repaint
+local G_SCALE_LO   = 0.80   -- plausible border-inflation scale: an outline copy
+local G_SCALE_HI   = 1.25   -- is the same mesh pushed out along its normals
+
+-- Least-squares uniform scale of the catalog positions onto the live ones,
+-- then the L1 residual under that scale. An entity border drawn as an inflated
+-- copy of the door is the same mesh at s ~= 1, so one free parameter absorbs it
+-- while 15 coordinates still have to agree.
+local function pos_fit(e_verts, live)
+  local dot, sq, raw = 0, 0, 0
+  for i = 1, 5 do
+    local ev, lv = e_verts[i], live[i]
+    dot = dot + ev.x * lv.x + ev.y * lv.y + ev.z * lv.z
+    sq  = sq  + ev.x * ev.x + ev.y * ev.y + ev.z * ev.z
+    raw = raw + math.abs(ev.x - lv.x) + math.abs(ev.y - lv.y) + math.abs(ev.z - lv.z)
+  end
+  if sq <= 0 then return raw, raw, 1 end
+  local s = dot / sq
+  if s < G_SCALE_LO or s > G_SCALE_HI then return raw, raw, s end
+  local fit = 0
+  for i = 1, 5 do
+    local ev, lv = e_verts[i], live[i]
+    fit = fit + math.abs(ev.x * s - lv.x) + math.abs(ev.y * s - lv.y) + math.abs(ev.z * s - lv.z)
+  end
+  return raw, math.min(raw, fit), s
+end
+
+-- Colour residual after fitting live = gain * catalog + offset independently per
+-- channel, plus the number of channels that could actually be fitted. A highlight
+-- tint (and ordinary lighting drift) is close enough to that affine to vanish
+-- here, while a genuinely different mesh's colours keep their own shape and do
+-- not flatten onto the print's.
+--
+-- Three ways a channel drops out, and every one of them matters for a
+-- highlighted door:
+--   * samples pinned at 0 or 255 -- a bright border saturates the mesh, and a
+--     clipped sample is no longer a linear function of anything, so fitting
+--     through it would reject the door for the highlight's own doing;
+--   * no live range left -- the border washed the channel flat, so it cannot
+--     tell this print from any other and must not pretend to;
+--   * a gain outside the plausible band -- the border repainted this channel
+--     rather than lit it, so the print's values say nothing about the live ones.
+-- A dropped channel is not a failure, it is silence: the residual is judged per
+-- SURVIVING channel, and zero survivors hands the decision to geometry alone
+-- (the flooded tier below), which is why that tier's position gate is tighter.
+local function colour_fit(e_verts, live)
+  -- One channel's residual under its own best gain+offset, or nil if the channel
+  -- carries nothing this print can be held to.
+  local function fit_channel(ch)
+    local es, ls, lo, hi = {}, {}, math.huge, -math.huge
+    for i = 1, 5 do
+      local l = live[i][ch]
+      if l > 0 and l < 255 then           -- unclipped: still carries signal
+        es[#es + 1] = e_verts[i][ch]
+        ls[#ls + 1] = l
+        if l < lo then lo = l end
+        if l > hi then hi = l end
+      end
+    end
+    local m = #es
+    if m < G_CH_MIN_PTS or (hi - lo) < G_CH_SPREAD then return nil end
+    local me, ml = 0, 0
+    for i = 1, m do me = me + es[i]; ml = ml + ls[i] end
+    me, ml = me / m, ml / m
+    local cov, var = 0, 0
+    for i = 1, m do
+      local de = es[i] - me
+      cov = cov + de * (ls[i] - ml)
+      var = var + de * de
+    end
+    -- Flat catalog channel: no gain is observable, so fit the offset only.
+    local a = (var > 0) and (cov / var) or 1
+    if a < G_GAIN_LO or a > G_GAIN_HI then return nil end
+    local b = ml - a * me
+    local r = 0
+    for i = 1, m do r = r + math.abs(a * es[i] + b - ls[i]) end
+    return r * 5 / m                      -- normalised to a full 5-sample channel
+  end
+  local raw = 0
+  for i = 1, 5 do
+    local ev, lv = e_verts[i], live[i]
+    raw = raw + math.abs(ev.r - lv.r) + math.abs(ev.g - lv.g) + math.abs(ev.b - lv.b)
+  end
+  local resid, used = 0, 0
+  for _, ch in ipairs({ "r", "g", "b" }) do
+    local r = fit_channel(ch)
+    if r then resid, used = resid + r, used + 1 end
+  end
+  return raw, resid, used
+end
+
+-- Fingerprint match: returns name (e.g. GUARDIAN_DOOR_3), score, mode -- or
+-- nil, score, nil. Geometry is the primary signal and colour only corroborates,
+-- because RuneScape's entity-border highlighting repaints a highlighted door's
+-- vertex colours, and when the border clips through the door we may be handed
+-- the border's own copy of the mesh rather than the door. The original test was
+-- absolute colour equality, so with highlighting on a guardian door simply went
+-- unrecognised. Three tiers, in descending confidence:
+--
+--   exact    pos + 2*col <= 300         an unhighlighted door; the old test,
+--                                       unchanged, and trusted on one sighting
+--   tinted   scale-fitted position tight AND colour matches up to a per-channel
+--            gain+offset                highlight tint / lighting drift
+--   flooded  scale-fitted position tighter AND the live colours have no
+--            variation left             the border washed the mesh flat, so
+--                                       geometry alone decides
+--
+-- What keeps the tolerant tiers honest is not the cutoffs but the gates around
+-- them: the exact-n bucket is exclusive (no resource, icon or ghost print shares
+-- a guardian vertexcount), 15 coordinates must still agree under a single free
+-- scale, and downstream (main.lua) a tolerant hit is only believed after a
+-- second sighting on a later frame and only ever paints a door that already
+-- leads to an unopened "?" room.
 RES.guardian_hit = function (event, n)
   local bucket = guardian_by_n[n]
   if not bucket then return nil end
@@ -682,18 +801,25 @@ RES.guardian_hit = function (event, n)
     }
   end
   table.sort(live, function (a, b) return a.y < b.y end)
+  -- Best by the strict score (tier 1) and best by fitted position (tiers 2-3)
+  -- are tracked separately: under a highlight the strict score is noise, and
+  -- position is the only thing left that still identifies the mesh.
   local best, bestname = math.huge, nil
+  local bpos, bposname, bshape, bused = math.huge, nil, math.huge, 0
   for _, e in ipairs(bucket) do
-    local pos, col = 0, 0
-    for i = 1, 5 do
-      local ev, lv = e.verts[i], live[i]
-      pos = pos + math.abs(ev.x - lv.x) + math.abs(ev.y - lv.y) + math.abs(ev.z - lv.z)
-      col = col + math.abs(ev.r - lv.r) + math.abs(ev.g - lv.g) + math.abs(ev.b - lv.b)
-    end
-    local s = pos + 2 * col
+    local raw_pos, fit_pos       = pos_fit(e.verts, live)
+    local raw_col, shape, used   = colour_fit(e.verts, live)
+    local s = raw_pos + 2 * raw_col
     if s < best then best, bestname = s, e.name end
+    if fit_pos < bpos then bpos, bposname, bshape, bused = fit_pos, e.name, shape, used end
   end
-  if best <= 300 then return bestname, best end
+  if best <= G_EXACT_CUT then return bestname, best, "exact" end
+  if bposname and bpos <= G_POS_TINT and bused > 0 and bshape <= G_SHAPE_CUT * bused then
+    return bposname, bpos, "tinted"
+  end
+  if bposname and bpos <= G_POS_FLOOD and bused == 0 then
+    return bposname, bpos, "flooded"
+  end
   return nil, best
 end
 
