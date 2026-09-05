@@ -99,23 +99,26 @@
       /* Room fills are the map's whole language, so they are ordered by how much
          is KNOWN about a room, lightest to darkest: proven critical, opened but
          unproven, proven bonus, still unopened. Values sampled off the reference
-         screenshot rather than picked by eye.
-         --par-crit is the crit BORDER: it used to be #dab260, a bright gold ring
-         that read as the loudest thing on the map and fought the fill it sat on.
-         The fill already says "critical"; the border is dark like every other
-         room's so the fills are what the eye sorts by. */
+         screenshot rather than picked by eye. --par-crit is the crit BORDER: a
+         gold ring, the one room state that gets a bright outline as well as a
+         bright fill. */
       :root{--cell-empty:rgba(0,0,0,0.65);--cell-body:#8a663c;--cell-base:#8a663c;--cell-boss:#8a2a2a;
-        --cell-unopened:#4e3618;--par-unknown:#2e230d;--par-bonus:#24190d;--par-crit:#3a2b12;--accent:#ffcf6b;}
+        --cell-unopened:#4e3618;--par-unknown:#2e230d;--par-bonus:#24190d;--par-crit:#dab260;--accent:#ffcf6b;}
       *{box-sizing:border-box;}
       .grid{position:relative;background:rgba(0,0,0,0.65);display:grid;
-        grid-template-columns:repeat(8,1fr);grid-template-rows:repeat(8,1fr);gap:1.3%;padding:1.3%;}
+        grid-template-columns:repeat(8,1fr);grid-template-rows:repeat(8,1fr);gap:{GAP}%;padding:{GAP}%;}
       .cell{background:var(--cell-empty);border:3px solid transparent;border-radius:3px;
         position:relative;overflow:visible;}
+      /* Corridor stubs are sized FROM the grid gap, not hardcoded, so widening
+         the gap cannot leave two connected rooms looking disconnected: each stub
+         reaches {OUT}% of a cell past its own edge -- the whole gap plus a small
+         overlap -- and every stub meets its opposite number mid-gap. Change
+         GRID_GAP alone and the joins follow. */
       .corridor{position:absolute;background:inherit;z-index:0;border-radius:1px;}
-      .corridor.n{top:-17%;left:32%;width:36%;height:22%;}
-      .corridor.s{bottom:-17%;left:32%;width:36%;height:22%;}
-      .corridor.e{right:-17%;top:32%;height:36%;width:22%;}
-      .corridor.w{left:-17%;top:32%;height:36%;width:22%;}
+      .corridor.n{top:-{OUT}%;left:32%;width:36%;height:{SPAN}%;}
+      .corridor.s{bottom:-{OUT}%;left:32%;width:36%;height:{SPAN}%;}
+      .corridor.e{right:-{OUT}%;top:32%;height:36%;width:{SPAN}%;}
+      .corridor.w{left:-{OUT}%;top:32%;height:36%;width:{SPAN}%;}
       .cell.body{background:var(--cell-body);border-style:double;}
       .cell.base{background:var(--cell-base);border-style:double;}
       .cell.boss{background:var(--cell-boss);border-style:double;}
@@ -141,10 +144,27 @@
     `;
 
     // ---- layout geometry for edge E (matches the %-based CSS grid) ----------
+    // GRID_GAP is the one knob for how much air sits between rooms: it is both
+    // the grid gap and the outer padding, as a fraction of the map edge. Rooms
+    // shrink as it grows (the 8 cells split whatever is left), which is the
+    // point -- separated rooms read as separate at a glance. The CSS gap and the
+    // corridor-stub lengths are both generated from it, so the two can never
+    // drift apart.
+    const GRID_GAP = 0.030;
     const geom = (E) => {
-      const pad = 0.013 * E, gap = 0.013 * E;
+      const pad = GRID_GAP * E, gap = GRID_GAP * E;
       const cell = (E - 2 * pad - 7 * gap) / 8;
       return { pad, gap, cell, step: cell + gap };
+    };
+    // Stub geometry as percentages of a CELL. A stub must cross the whole gap
+    // and then bite into the neighbour, or a connection reads as a break; the
+    // overlap is what the original hardcoded 17%/22% pair amounted to at the old
+    // 1.3% gap, kept here as a ratio so it survives any GRID_GAP.
+    const CORRIDOR_OVERLAP = 5.2, CORRIDOR_INSET = 5;
+    const corridorRatios = () => {
+      const g = geom(1);
+      const out = (g.gap / g.cell) * 100 + CORRIDOR_OVERLAP;
+      return { out: out.toFixed(1), span: (out + CORRIDOR_INSET).toFixed(1) };
     };
 
     // ---- atlas + mesh machinery (unchanged from the canvas pipeline) --------
@@ -510,7 +530,12 @@
       if (rendering) { dirty = true; return; }
       rendering = true; dirty = false;
       const E = EDGE, RE = renderEdge(), gE = geom(E);
-      const css = CHROME_CSS.replace("{FONT}", (0.646 * gE.cell).toFixed(1));
+      const cr = corridorRatios();
+      const css = CHROME_CSS
+        .split("{FONT}").join((0.646 * gE.cell).toFixed(1))
+        .split("{GAP}").join((GRID_GAP * 100).toFixed(1))
+        .split("{OUT}").join(cr.out)
+        .split("{SPAN}").join(cr.span);
       const chrome = lastRooms ? buildChromeHTML(lastRooms, E) : ('<div class="grid" style="width:'+E+'px;height:'+E+'px"></div>');
       const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="'+RE+'" height="'+RE+'" viewBox="0 0 '+E+' '+E+'">' +
         '<foreignObject width="'+E+'" height="'+E+'">' +

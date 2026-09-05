@@ -29,6 +29,10 @@ return function (deps)
     { key = "scan_range_tiles",     type = "int_stepper", default = 64, min = 32, max = 64, step = 16,
       label = "Scan range", category = "dev" },
     { key = "show_capture_zones",   type = "bool",        default = true,  label = "Show capture zones", category = "normal" },
+    -- Pulsing in-world ring on the frontier door to open next, for clearing a
+    -- whole floor (pathing.lua). Toggleable because a flashing overlay you
+    -- cannot switch off is an overlay you end up resenting.
+    { key = "next_door_hint",       type = "bool",        default = true,  label = "Next-door hint", category = "normal" },
     -- Ground-key cursor hint: the key icon(s) stacked beside the mouse.
     { key = "cursor_keys_enabled",  type = "bool",        default = true,  label = "Cursor key icons", category = "normal" },
     { key = "cursor_keys_scale",    type = "int_stepper", default = 200, min = 50, max = 300, step = 10,

@@ -1049,6 +1049,155 @@ end
         check('guardian confirm state is wiped with the floor',
               'S.guardian_pend      = nil' in src)
 
+    # ---- pathing: which frontier door to open next --------------------------
+    # The recommender drives a FLASHING in-world marker, so two things matter as
+    # much as the ranking itself: it must never point at a door that cannot be
+    # opened, and equal-scoring doors must resolve the same way every tick or
+    # the marker hops between them, which is worse than no marker at all.
+    # Loaded the way main.lua loads it, so this exercises the shipped file.
+    print('\npathing: next door to open (full-clear order)')
+    pth = io.open(os.path.join(os.path.dirname(MAIN), 'pathing.lua'),
+                  encoding='utf-8').read()
+    lua.compile(pth)                                   # parse check pathing.lua
+    lua.execute('PATH = require("pathing")({cell_doors = cell_doors,'
+                ' key_lower = key_lower, NEI_DELTA = NEI_DELTA,'
+                ' NEI_OPP = NEI_OPP})')
+
+    def rank(spec, start, held=(), guardians=()):
+        model = lua.table_from({
+            'rooms': cells(lua, spec), 'start': start,
+            'held': lua.table_from({k: True for k in held}),
+            'guardian_targets': lua.table_from({k: True for k in guardians}),
+        })
+        return list(g.PATH.rank(model).values())
+
+    def best(spec, start, held=(), guardians=()):
+        model = lua.table_from({
+            'rooms': cells(lua, spec), 'start': start,
+            'held': lua.table_from({k: True for k in held}),
+            'guardian_targets': lua.table_from({k: True for k in guardians}),
+        })
+        return g.PATH.best(model)
+
+    # A corridor east from the base with two frontier doors: the near one is a
+    # walled-in dead end (every neighbour already mapped), the far one can still
+    # open into blank grid. Near-first is the rule, so the dead end wins -- you
+    # have to open it anyway and it is on the way.
+    sweep = {
+        (1, 1): ['ICON_BASE', '2WAY_EW'],
+        (2, 1): ['2WAY_EW'],
+        (3, 1): ['3WAY_NEW'],
+        (3, 0): ['UNOPENED_SOUTH_TEMPLATE'],          # dead end, boxed in below
+        (4, 1): ['UNOPENED_WEST_TEMPLATE'],           # can still expand east
+        (2, 0): ['2WAY_ES'], (4, 0): ['2WAY_SW'],     # box (3,0) in
+    }
+    r = rank(sweep, '1,1')
+    check('every frontier door is found', len(r) == 2, '%d found' % len(r))
+    if len(r) == 2:
+        byto = {c['to']: c for c in r}
+        check('boxed-in room scores expansion 0 (a PROVEN dead end)',
+              byto['3,0']['expansion'] == 0, str(byto['3,0']['expansion']))
+        check('open-sided room scores expansion > 0',
+              byto['4,1']['expansion'] > 0, str(byto['4,1']['expansion']))
+        check('steps are walked rooms, not straight-line',
+              byto['3,0']['steps'] == 2 and byto['4,1']['steps'] == 2,
+              '%s / %s' % (byto['3,0']['steps'], byto['4,1']['steps']))
+        check('at equal distance the room that reveals more wins',
+              r[0]['to'] == '4,1', 'picked ' + r[0]['to'])
+
+    # Distance must be able to outweigh expansion: the same open-sided room, now
+    # four rooms further away, loses to the dead end at your feet.
+    far = dict(sweep)
+    del far[(4, 1)]
+    far.update({(4, 1): ['2WAY_EW'], (5, 1): ['2WAY_EW'], (6, 1): ['2WAY_EW'],
+                (7, 1): ['UNOPENED_WEST_TEMPLATE']})
+    r = rank(far, '1,1')
+    check('a distant reveal loses to a dead end at your feet',
+          r[0]['to'] == '3,0', 'picked ' + r[0]['to'])
+
+    # A door you cannot open must never be the recommendation. Same floor, but
+    # the only frontier room is key-locked.
+    locked = {
+        (1, 1): ['ICON_BASE', '2WAY_EW'],
+        (2, 1): ['2WAY_EW'],
+        (3, 1): ['UNOPENED_WEST_TEMPLATE', 'blue_diamond'],
+    }
+    r = rank(locked, '1,1')
+    check('a key-locked room is flagged blocked',
+          len(r) == 1 and r[0]['blocked'] == 'key',
+          r and str(r[0]['blocked']))
+    b, _ = best(locked, '1,1')
+    check('best() returns nothing rather than an unopenable door', b is None)
+    b, _ = best(locked, '1,1', held=['blue_diamond'])
+    check('holding the key makes that same door the recommendation',
+          b is not None and b['to'] == '3,1')
+    if b is not None:
+        check('spending a held key is scored as a bonus, not a penalty',
+              b['score'] > rank(locked, '1,1')[0]['score'])
+
+    # Guardians and skill doors are penalties, not blocks: you CAN open them,
+    # they just cost more than a plain door, so an equal plain door wins.
+    two = {
+        (1, 1): ['ICON_BASE', '2WAY_EW'], (2, 1): ['4WAY'],
+        (2, 0): ['UNOPENED_SOUTH_QUESTION'],
+        (2, 2): ['UNOPENED_NORTH_TEMPLATE'],
+        (3, 1): ['UNOPENED_WEST_TEMPLATE'],
+    }
+    r = rank(two, '1,1', guardians=['2,0'])
+    byto = {c['to']: c for c in r}
+    check('a guardian door is still openable, just penalised',
+          byto['2,0']['blocked'] is None and byto['2,0']['guardian'] is True)
+    check('guardian door is not the recommendation over a plain one',
+          r[0]['to'] != '2,0', 'picked ' + r[0]['to'])
+
+    # Unreachable frontier: a door out of a room you cannot walk to yet is not a
+    # next step. (3,1)'s door east is real, but (3,1) is not connected to base.
+    island = {
+        (1, 1): ['ICON_BASE', 'DE_EAST'],
+        (2, 1): ['UNOPENED_WEST_TEMPLATE'],
+        (5, 5): ['2WAY_EW'], (6, 5): ['UNOPENED_WEST_TEMPLATE'],
+    }
+    r = rank(island, '1,1')
+    check('frontier of an unreachable island is excluded',
+          [c['to'] for c in r] == ['2,1'], str([c['to'] for c in r]))
+
+    # Stability: the marker flashes, so an unchanged floor must rank identically
+    # every tick regardless of Lua table iteration order.
+    orders = set()
+    for _ in range(8):
+        orders.add(tuple((c['to'], c['dir']) for c in rank(sweep, '1,1')))
+    check('ranking is stable across repeated solves (marker cannot hop)',
+          len(orders) == 1, '%d distinct orders' % len(orders))
+
+    # Wiring: the in-world pass must ADD the hint outline rather than recolour
+    # the door, or the recommendation would erase the parity/key colour.
+    check('hint is an extra outline, not a colour override',
+          'next = is_next' in src and 'buckets.next_cyan' in src)
+    check('hint pulses (motion, not a sixth colour)',
+          'hint_pulse' in src and 'next_cyan" and hint_pulse' in src)
+    check('hint can be switched off',
+          'NEXT_DOOR_HINT' in src and 'next_door_hint' in
+          io.open(os.path.join(os.path.dirname(MAIN), 'settings_panel.lua'),
+                  encoding='utf-8').read())
+
+    # ---- guardian doors paint their in-world floor tiles magenta ------------
+    # The override is the last word on a guardian door's colour, and it feeds
+    # BOTH the outline and the tile fill. Guarded because the colour is the
+    # only in-world signal that a door wants a guardian fight, and it is one
+    # `elseif` away from being silently outranked by the key-door colours.
+    m = re.search(r'\{\s*"guardian_magenta",\s*([\d.]+),\s*([\d.]+),\s*([\d.]+)', src)
+    check('guardian_magenta has an RGB entry', bool(m))
+    if m:
+        r_, g_, b_ = (float(x) for x in m.groups())
+        check('guardian_magenta is actually magenta (high R+B, low G)',
+              r_ > 0.8 and b_ > 0.8 and g_ < 0.3, '%.2f %.2f %.2f' % (r_, g_, b_))
+    check('guardian doors paint the tile FILL as well as the outline',
+          "fills   = { gray" in src and 'guardian_magenta = {}' in
+          src[src.index('local fills'):src.index('local fills') + 260])
+    ovr = src.index('OVERRIDE for Guardian Doors')
+    check('the magenta override is applied AFTER door_color, so it wins',
+          src.index('local color = door_color') < ovr < src.index('local tiles = style'))
+
     print('\n%s  (%d failed)' % ('ALL GREEN' if not FAILS else 'FAILURES: ' + ', '.join(FAILS),
                                  len(FAILS)))
     return 1 if FAILS else 0
