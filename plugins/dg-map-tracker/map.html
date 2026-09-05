@@ -606,7 +606,14 @@
       }
       if (c.startsWith("rooms:")) { try { lastRooms = JSON.parse(c.slice(6)); } catch (_) { return; } repaint(); return; }
       if (c.startsWith("held_keys:")) { heldKeys = new Set(c.slice(10).split(",").filter(Boolean)); repaint(); return; }
-      if (c.startsWith("camera_angle:")) { cameraAngle = parseFloat(c.slice(13)); fastRepaint(); return; }
+      // "camera_angle:off" (the toggle) and any unparseable payload both mean
+      // NO BEARING, which draws no cone -- never a cone left frozen at the last
+      // angle it happened to have.
+      if (c.startsWith("camera_angle:")) {
+        const v = c.slice(13), n = parseFloat(v);
+        cameraAngle = (v === "off" || !Number.isFinite(n)) ? null : n;
+        fastRepaint(); return;
+      }
       if (c.startsWith("key_mesh:")) {
         for (const ln of c.slice(9).split("\n")) { const p = ln.split("|"); if (p.length!==5) continue;
           const [name,swS,shS,mvpS,ptsS] = p;

@@ -1180,6 +1180,26 @@ end
           io.open(os.path.join(os.path.dirname(MAIN), 'settings_panel.lua'),
                   encoding='utf-8').read())
 
+    # ---- FOV cone toggle ----------------------------------------------------
+    # Turning the cone off has to SAY so. Going quiet would leave the cone
+    # frozen at its last bearing, which is the stale-direction failure the null
+    # seeding exists to prevent -- so the off path sends a sentinel and the map
+    # treats it, and any unparseable payload, as "no bearing" rather than 0
+    # (which is a real bearing: due north).
+    settings = io.open(os.path.join(os.path.dirname(MAIN), 'settings_panel.lua'),
+                       encoding='utf-8').read()
+    check('cone has a settings row', 'fov_cone_enabled' in settings)
+    check('cone toggle is polled into a flag',
+          'FOV_CONE_ENABLED' in src and 's.fov_cone_enabled' in src)
+    check('switching the cone off sends an explicit "off", not silence',
+          'camera_angle:off' in src)
+    check('the off sentinel is sent once, not every frame',
+          'S.last_camera_angle ~= "off"' in src)
+    mapjs = io.open(os.path.join(os.path.dirname(MAIN), 'map.html'),
+                    encoding='utf-8').read()
+    check('map reads "off" and any unparseable angle as no cone',
+          'v === "off"' in mapjs and '!Number.isFinite(n)' in mapjs)
+
     # ---- guardian doors paint their in-world floor tiles magenta ------------
     # The override is the last word on a guardian door's colour, and it feeds
     # BOTH the outline and the tile fill. Guarded because the colour is the

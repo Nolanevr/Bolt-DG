@@ -198,6 +198,7 @@ SET.examine = {}   -- box-OCR examine reader; module body further down
 SET.sync = { browser = nil }
 local SCAN_RANGE_TILES       = SET.get("scan_range_tiles",      64)
 local NEXT_DOOR_HINT         = SET.get("next_door_hint",        true)
+local FOV_CONE_ENABLED       = SET.get("fov_cone_enabled",      true)
 
 local region_browser   -- forward decls
 local keybag_region_browser
@@ -300,6 +301,7 @@ local function poll_settings()
     SCAN_RANGE_TILES = s.scan_range_tiles
   end
   if s.next_door_hint ~= nil then NEXT_DOOR_HINT = s.next_door_hint end
+  if s.fov_cone_enabled ~= nil then FOV_CONE_ENABLED = s.fov_cone_enabled end
   -- Map size: recreate the rooms panel at the new scale (no resize API on
   -- embedded browsers; aspect stays locked because both dims scale together).
   local msc = tonumber(s.rooms_panel_scale) or 100
@@ -4743,24 +4745,37 @@ local function key_icon(name)
 end
 
 bolt.onswapbuffers(function (event)
-  -- --- NEW: Camera angle for the FOV cone ---
+  -- --- Camera angle for the FOV cone ---
   -- Bearing of the player as seen FROM the camera, i.e. the direction the camera
   -- is looking: 0 = north, 90 = east. map.html turns it into the FOV cone.
   -- Gated on cam_ok, not on cam_x: see the LD.cam_ok note. Until a real camera
   -- lands nothing is sent, and the map draws no cone rather than a false one.
-  local pp = bolt.playerposition()
-  if pp and SET.line.cam_ok then
-    local px, py, pz = pp:get()
-    local dx = px - SET.line.cam_x
-    local dz = pz - SET.line.cam_z
-    -- Degenerate only if the camera sits exactly on the player; atan2(0,0) would
-    -- report due north, which is the same lie cam_ok exists to prevent.
-    if math.abs(dx) + math.abs(dz) > 1 then
-      local angle_rad = math.atan2(dx, dz)
-      local angle_deg = math.floor((math.deg(angle_rad) + 360) % 360)
-      if rooms_browser and angle_deg ~= S.last_camera_angle then
-        S.last_camera_angle = angle_deg
-        rooms_browser:sendmessage("camera_angle:" .. tostring(angle_deg))
+  if not FOV_CONE_ENABLED then
+    -- Say so ONCE, then stay quiet. Just going silent would strand the cone at
+    -- whatever bearing it last had -- and a cone frozen at a stale direction is
+    -- worse than no cone, which is exactly why an unknown angle draws nothing.
+    -- The "off" sentinel also means turning the setting back on re-sends a real
+    -- bearing immediately: it never equals a number, so the dedupe below cannot
+    -- swallow the first angle after a re-enable.
+    if rooms_browser and S.last_camera_angle ~= "off" then
+      S.last_camera_angle = "off"
+      rooms_browser:sendmessage("camera_angle:off")
+    end
+  else
+    local pp = bolt.playerposition()
+    if pp and SET.line.cam_ok then
+      local px, py, pz = pp:get()
+      local dx = px - SET.line.cam_x
+      local dz = pz - SET.line.cam_z
+      -- Degenerate only if the camera sits exactly on the player; atan2(0,0)
+      -- would report due north, the same lie cam_ok exists to prevent.
+      if math.abs(dx) + math.abs(dz) > 1 then
+        local angle_rad = math.atan2(dx, dz)
+        local angle_deg = math.floor((math.deg(angle_rad) + 360) % 360)
+        if rooms_browser and angle_deg ~= S.last_camera_angle then
+          S.last_camera_angle = angle_deg
+          rooms_browser:sendmessage("camera_angle:" .. tostring(angle_deg))
+        end
       end
     end
   end
