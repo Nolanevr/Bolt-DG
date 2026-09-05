@@ -59,7 +59,9 @@ those are large / append-heavy and don't fit the flat-JSON shape.
 Guardian doors are recognised from a 3D-mesh fingerprint
 (`guardian_doors.txt`, one print per floor type) and painted magenta,
 with a second red outline on every other door of the same room until
-the `?` room behind them is opened.
+the `?` room behind them is opened. In-world, a recognised guardian door's
+floor tiles are filled and outlined magenta, overriding the parity and
+key-door colouring for that door.
 
 **RuneScape's own entity highlighting can be left on.** The border pass
 repaints a highlighted door's vertex colours -- and when the border
@@ -80,6 +82,68 @@ sticks; an `exact` hit still binds on sight. Detection also runs every
 frame and is not culled by the resource scan range -- a guardian door
 is room structure, not scenery you walk up to.
 
+## Next-door hint
+
+With **Next-door hint** on (settings panel, default on), the frontier door the
+plugin thinks you should open next gets a pulsing cyan ring in-world, drawn
+*outside* the door's normal parity/key colouring so it adds an answer rather
+than replacing one.
+
+The ranking (`pathing.lua`) is built for **clearing a whole floor**, not for
+rushing the boss -- which rooms you open is settled, only the order is open, so
+it scores:
+
+| Term | Points | Why |
+|------|--------|-----|
+| rooms walked to reach the door | -18 each | backtracking is the whole cost of a full clear |
+| blank neighbours the room could open into (0-3) | +22 each | how much new map it can reveal |
+| lock whose key is in your bag | +30 | spend the key while you are standing there |
+| guardian door | -45 | costs a fight |
+| skill door | -20 | may want a level, resources, or a detour |
+| `?` room | -6 | contents unknown |
+
+Distance dominates on purpose: the cheapest next room is usually the right one,
+and a reveal can only pull you about two rooms out of your way. A door you
+*cannot* open (a key you have not found) is never the recommendation -- it is
+ranked and flagged, but the marker only ever points somewhere you can actually
+go. If every frontier door is gated, no marker is shown.
+
+"Expansion" is the honest part of the estimate: an unopened room's doors are
+invisible, but a room can only lead somewhere new through a grid neighbour that
+is still blank, so a count of blank neighbours is a hard upper bound -- and 0
+means a *proven* dead end, not a guess.
+
+With dev tools on, `pathing_diag.txt` lists the top frontier doors with their
+score breakdown, so the marker can be audited rather than trusted.
+
+## Map render cost
+
+The map is rendered in an off-DOM canvas and the whole surface is exported to
+Lua on every repaint, so repaint cost is the map's latency. Two numbers worth
+knowing if you touch that path (measured in headless Chromium, 17-room floor):
+
+| | before | after |
+|---|---|---|
+| repaint (drives the FOV cone) | 75 ms -> ~13/s | 2.2 ms -> capped 30/s |
+| room opens -> pixels exported | 76 ms | 7 ms |
+
+Both had the same cause: icon shadows were drawn under `ctx.filter:
+drop-shadow(...)`. *Setting* a canvas filter is free; *drawing* beneath one
+costs ~20 ms per icon, and the bill arrives at the next `getImageData` -- so
+the export, not the drawing, appeared to be slow. `ctx.shadow*` is the same
+effect about 290x cheaper.
+
+Angle-only repaints are coalesced to one per animation frame and capped
+(`FAST_MIN_MS`, 33 ms). The cap is about bandwidth, not drawing: every repaint
+ships the entire surface, which is 0.56 MB at the default map size and 2.2 MB
+at a large map on a HiDPI screen, so an uncapped cone is a ~130 MB/s stream of
+pixels for motion that reads as smooth at 30 Hz.
+
+On the Lua side the room graph is rebuilt every frame but pushed to the panel
+on a 4 Hz dump; a change to the graph (a room opening, a key icon appearing)
+now kicks that push in the same frame, so opening a room no longer costs up to
+250 ms of staleness.
+
 ## Diagnostics
 
 Always on. The plugin writes state files into its config dir
@@ -92,7 +156,8 @@ particular.
 With dev tools on, `guardian_diag.txt` logs each guardian door as it
 binds (with the tier and score that bound it) and one `MISS` line per
 vertexcount that reached the matcher and failed -- the score on that
-line says how far off the print it was.
+line says how far off the print it was. `pathing_diag.txt` carries the
+scored frontier-door ranking behind the next-door hint.
 
 ## Panels
 

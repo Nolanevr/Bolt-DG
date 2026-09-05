@@ -197,6 +197,7 @@ SET.examine = {}   -- box-OCR examine reader; module body further down
 -- Party-sync sidecar state; open/close defined by the sync module below.
 SET.sync = { browser = nil }
 local SCAN_RANGE_TILES       = SET.get("scan_range_tiles",      64)
+local NEXT_DOOR_HINT         = SET.get("next_door_hint",        true)
 
 local region_browser   -- forward decls
 local keybag_region_browser
@@ -298,6 +299,7 @@ local function poll_settings()
   if type(s.scan_range_tiles) == "number" and s.scan_range_tiles >= 1 and s.scan_range_tiles <= 64 then
     SCAN_RANGE_TILES = s.scan_range_tiles
   end
+  if s.next_door_hint ~= nil then NEXT_DOOR_HINT = s.next_door_hint end
   -- Map size: recreate the rooms panel at the new scale (no resize API on
   -- embedded browsers; aspect stays locked because both dims scale together).
   local msc = tonumber(s.rooms_panel_scale) or 100
@@ -709,6 +711,7 @@ local function wipe_floor_state()
   S.rpm_last           = "0.0"   -- header RPM resets to 0.0 on a new floor
   S.key_match_seen     = nil     -- ground-key match tuning log (dev)
   S.key_match_log      = nil
+  S.rooms_fp           = nil     -- room-graph fingerprint (map push kick)
   S.guardian_seen      = nil     -- guardian-door detections (sticky per floor)
   S.guardian_pend      = nil     -- tolerant hits awaiting a second-frame confirm
   S.guardian_miss      = nil     -- guardian-n meshes that matched nothing (dev)
@@ -1280,6 +1283,13 @@ local solve_parity = require("parity")({
   cell_doors = cell_doors, key_lower = key_lower,
   NEI_DELTA = NEI_DELTA, NEI_OPP = NEI_OPP,
 })
+-- Next-door recommender for a FULL CLEAR. Same injected-deps shape as the
+-- parity engine and, like it, a pure function of a room snapshot -- so
+-- test/spec.py exercises the shipped file rather than a copy.
+SET.pathing = require("pathing")({
+  cell_doors = cell_doors, key_lower = key_lower,
+  NEI_DELTA = NEI_DELTA, NEI_OPP = NEI_OPP,
+})
 -- Thin wrapper: gather live observations into a plain snapshot, then solve.
 --
 -- PROVEN PARITY IS PERSISTED (S.parity_facts) and re-seeded every tick. Parity
@@ -1597,6 +1607,32 @@ end
 
 -- Serialise rooms_by_cell to rooms.txt, sorted for stability. Only rewrites
 -- the file when the hash changes so tools tailing it don't re-fire.
+-- Cheap per-frame fingerprint of the room graph, so a room OPENING can push the
+-- map immediately instead of waiting out the 4Hz dump cadence (up to 250ms of
+-- staleness on the one event you are watching for). Hashes each cell's key, its
+-- image count and its first/last image name -- opening a room rewrites the body
+-- name and usually the image count, so it always lands.
+--
+-- Cells are combined COMMUTATIVELY (a sum) because pairs() order is not stable
+-- across frames, and each cell's hash is kept under 2^24 so the running total
+-- stays exact in a double. A collision is not a correctness problem: it only
+-- means this frame's change waits for the next 4Hz tick, which is exactly the
+-- old behaviour.
+local function rooms_fingerprint()
+  local total = 0
+  for k, c in pairs(rooms_by_cell) do
+    local h = #c.images * 131
+    for i = 1, #k do h = (h * 31 + k:byte(i)) % 16777216 end
+    local first, last = c.images[1], c.images[#c.images]
+    if first then for i = 1, #first do h = (h * 31 + first:byte(i)) % 16777216 end end
+    if last and last ~= first then
+      for i = 1, #last do h = (h * 31 + last:byte(i)) % 16777216 end
+    end
+    total = total + h
+  end
+  return total
+end
+
 local function dump_rooms()
   compute_parity()
   local cells = {}
@@ -2807,6 +2843,13 @@ LD.key_order       = 0
 -- re-logged. Cleared on floor change alongside key_log.
 LD.collected       = {}
 LD.cam_x, LD.cam_y, LD.cam_z = 0, 0, 0
+-- The billboard maths needs three numbers from frame one, so cam_* seed to the
+-- world ORIGIN rather than nil -- and 0 is truthy in Lua, so `if LD.cam_x then`
+-- is true before any camera has been sampled. cam_ok is the honest test: false
+-- until a real camera position lands. Only the FOV-cone bearing consults it; a
+-- bearing measured from the world origin is not a camera direction, it is the
+-- player's map position dressed up as one.
+LD.cam_ok = false
 do
   local c = SET.get("line_color", { 255, 70, 70, 255 })
   LD.cr, LD.cg, LD.cb, LD.ca = c[1], c[2], c[3], c[4]
@@ -3610,6 +3653,7 @@ bolt.onrender3d(function (event)
       -- Prevent UI/Skybox cameras from hijacking the angle
       if (math.abs(f3d.cx - f3d.px) + math.abs(f3d.cz - f3d.pz)) < 15000 then
         SET.line.cam_x, SET.line.cam_y, SET.line.cam_z = f3d.cx, f3d.cy, f3d.cz
+        SET.line.cam_ok = true
       end
     end
   end
@@ -4326,6 +4370,63 @@ bolt.onrendergameview(function (event)
         end
         return false
       end
+      -- ---- NEXT-DOOR HINT ------------------------------------------------
+      -- Which frontier door to open first, for a player clearing the WHOLE
+      -- floor rather than rushing the boss (see pathing.lua for the model).
+      -- Recomputed at most 4x/second: it only changes when a room opens or a
+      -- key moves, and the marker pulses on its own, so a per-frame re-rank
+      -- would burn CPU to produce the same answer.
+      local next_hint = nil
+      if NEXT_DOOR_HINT and pgx and next(rooms_by_cell) then
+        local now = bolt.time()
+        if not S.next_hint_us or (now - S.next_hint_us) > 250000 then
+          S.next_hint_us = now
+          -- Keys in the bag right now, on the same 60-tick freshness rule the
+          -- door colouring uses.
+          local held = {}
+          for name, tick in pairs(S.keybag_state) do
+            if S.keybag_tick - tick <= 60 then held[name] = true end
+          end
+          -- Unopened cells sitting behind a detected guardian door, keyed the
+          -- way pathing.lua wants them. guardian_door() is per (room, dir), so
+          -- walk the rooms we know and record the cell each guardian leads to.
+          local gtargets = {}
+          if S.guardian_seen and S.map_origin then
+            for gck, gcell in pairs(rooms_by_cell) do
+              local rtx = (gcell.gx + S.map_origin.wrx) * 16
+              local rtz = (S.map_origin.wrz - gcell.gz) * 16
+              for dir in pairs(cell_doors(gcell)) do
+                if guardian_door(gcell.gx, gcell.gz, dir, rtx, rtz) then
+                  local dd = NEI_DELTA[dir]
+                  gtargets[(gcell.gx + dd[1]) .. "," .. (gcell.gz + dd[2])] = true
+                end
+              end
+            end
+          end
+          local best, ranked = SET.pathing.best({
+            rooms = rooms_by_cell, start = pgx .. "," .. pgz,
+            held = held, guardian_targets = gtargets,
+          })
+          S.next_hint = best
+          -- The ranking IS the explanation, so write it out rather than only
+          -- the winner: "why that door" is the first question this feature
+          -- invites, and a marker you cannot audit is a marker you cannot trust.
+          if SET.DEV and ranked then
+            local w = { string.format("player %s  (%d frontier doors)\n", pgx .. "," .. pgz, #ranked) }
+            for i, c in ipairs(ranked) do
+              if i > 12 then break end
+              w[#w + 1] = string.format(
+                "%2d. %s -%s-> %s  score=%4d  steps=%d exp=%d%s%s%s%s\n",
+                i, c.from, c.dir, c.to, c.score, c.steps, c.expansion,
+                c.blocked and ("  BLOCKED:" .. c.blocked) or "",
+                c.keyname and ("  key=" .. c.keyname) or "",
+                c.guardian and "  guardian" or "", c.skill and "  skilldoor" or "")
+            end
+            SET.dev_save("pathing_diag.txt", table.concat(w))
+          end
+        end
+        next_hint = S.next_hint
+      end
       local shapes = {}   -- { tiles = {{tx,tz}...}, mode = "solid"|"brackets" }
       if pgx then
         for dz = -1, 1 do
@@ -4380,7 +4481,14 @@ bolt.onrendergameview(function (event)
                   end
 
                   local tiles = style and CSHAPE[dir] or FRONT[dir]
-                  shapes[#shapes + 1] = { tiles = tiles, mode = "solid", color = color, red = room_guard }
+                  -- The hint is an EXTRA outline, not a recolour: the parity /
+                  -- key / guardian colour is the information you came for, and
+                  -- a recommendation that erased it would trade one answer for
+                  -- another instead of adding one.
+                  local is_next = next_hint ~= nil
+                    and next_hint.from == (cgx .. "," .. cgz) and next_hint.dir == dir
+                  shapes[#shapes + 1] = { tiles = tiles, mode = "solid", color = color,
+                                          red = room_guard, next = is_next }
                 end
               end
             end
@@ -4398,17 +4506,26 @@ bolt.onrendergameview(function (event)
         local Tk = 32          -- outline half-thickness (world units)
         local TK = 176         -- corner-bracket tick length
         local RD, RT, RO = 62, 18, 80   -- red 2nd outline: offset out, half-thick, corner extend
+        local ND, NT, NO = 128, 26, 150 -- next-door hint outline: sits OUTSIDE the red
+        -- Pulse for the next-door hint, ~1s period. The marker has to compete
+        -- with a lit dungeon floor and four other outline colours, and motion is
+        -- the one channel none of them use -- a static cyan ring would just be a
+        -- sixth colour to decode. bolt.time() is microseconds.
+        local hint_pulse = 0.30 + 0.65 * (0.5 + 0.5 * math.sin(bolt.time() / 160000))
         local y  = py + 20     -- lift above the floor (occlusion, see shader)
         -- Build the outline quads, bucketed by colour (parity of the room the
         -- door leads to). Merged perimeter: draw a tile edge only when the
         -- neighbouring tile is NOT in the same shape (no internal lines). Corner
         -- brackets: a tick along each boundary edge at every corner.
-        local buckets = { gray = {}, green = {}, yellow = {}, guardian_magenta = {}, red = {}, bright_green = {}, bright_red = {}, dark_green = {}, dark_red = {}, white = {}, orange = {} }
+        local buckets = { gray = {}, green = {}, yellow = {}, guardian_magenta = {}, red = {}, next_cyan = {}, bright_green = {}, bright_red = {}, dark_green = {}, dark_red = {}, white = {}, orange = {} }
+        -- next_cyan and red are outline-only sinks: no entry here, and the fill
+        -- loop skips a colour with no fill bucket.
         local fills   = { gray = {}, green = {}, yellow = {}, guardian_magenta = {}, bright_green = {}, bright_red = {}, dark_green = {}, dark_red = {}, white = {}, orange = {} }
         for _, sh in ipairs(shapes) do
           local quads = buckets[sh.color]
           local fillq = fills[sh.color]
           local rq = sh.red and buckets.red or nil   -- second (red) outline sink
+          local nq = sh.next and buckets.next_cyan or nil  -- next-door hint sink
           local set = {}
           for _, t in ipairs(sh.tiles) do set[t[1] .. "," .. t[2]] = true end
           for _, t in ipairs(sh.tiles) do            -- fill matches the outline colour
@@ -4425,18 +4542,22 @@ bolt.onrendergameview(function (event)
               if not set[tx .. "," .. (tz-1)] then
                 quads[#quads+1] = {x1, z1-Tk, x2, z1+Tk}
                 if rq then rq[#rq+1] = {x1-RO, z1-RD-RT, x2+RO, z1-RD+RT} end
+                if nq then nq[#nq+1] = {x1-NO, z1-ND-NT, x2+NO, z1-ND+NT} end
               end
               if not set[tx .. "," .. (tz+1)] then
                 quads[#quads+1] = {x1, z2-Tk, x2, z2+Tk}
                 if rq then rq[#rq+1] = {x1-RO, z2+RD-RT, x2+RO, z2+RD+RT} end
+                if nq then nq[#nq+1] = {x1-NO, z2+ND-NT, x2+NO, z2+ND+NT} end
               end
               if not set[(tx-1) .. "," .. tz] then
                 quads[#quads+1] = {x1-Tk, z1, x1+Tk, z2}
                 if rq then rq[#rq+1] = {x1-RD-RT, z1-RO, x1-RD+RT, z2+RO} end
+                if nq then nq[#nq+1] = {x1-ND-NT, z1-NO, x1-ND+NT, z2+NO} end
               end
               if not set[(tx+1) .. "," .. tz] then
                 quads[#quads+1] = {x2-Tk, z1, x2+Tk, z2}
                 if rq then rq[#rq+1] = {x2+RD-RT, z1-RO, x2+RD+RT, z2+RO} end
+                if nq then nq[#nq+1] = {x2+ND-NT, z1-NO, x2+ND+NT, z2+NO} end
               end
             end
           else
@@ -4476,6 +4597,7 @@ bolt.onrendergameview(function (event)
           { "yellow",           1.00, 0.90, 0.15 }, -- Unknown parity
           { "guardian_magenta", 1.00, 0.15, 0.90 }, -- Guardian Door
           { "red",              1.00, 0.15, 0.15 }, -- Guardian 2nd outline
+          { "next_cyan",        0.20, 1.00, 1.00 }, -- "open this next" hint (pulses)
           
           -- KEY DOOR COLORS
           { "bright_green",     0.20, 1.00, 0.20 }, -- Held key (crit)
@@ -4501,7 +4623,8 @@ bolt.onrendergameview(function (event)
         for _, c in ipairs(COLORS) do
           local quads = buckets[c[1]]
           if #quads > 0 then
-            sr_program_occ:setuniform4f(2, c[2], c[3], c[4], 0.9)
+            sr_program_occ:setuniform4f(2, c[2], c[3], c[4],
+              c[1] == "next_cyan" and hint_pulse or 0.9)
             local gb = bolt.createbuffer(#quads * 6 * sr_bytes_per_vert)
             local goff = 0
             for _, q in ipairs(quads) do
@@ -4621,16 +4744,24 @@ end
 
 bolt.onswapbuffers(function (event)
   -- --- NEW: Camera angle for the FOV cone ---
+  -- Bearing of the player as seen FROM the camera, i.e. the direction the camera
+  -- is looking: 0 = north, 90 = east. map.html turns it into the FOV cone.
+  -- Gated on cam_ok, not on cam_x: see the LD.cam_ok note. Until a real camera
+  -- lands nothing is sent, and the map draws no cone rather than a false one.
   local pp = bolt.playerposition()
-  if pp and SET.line.cam_x then
+  if pp and SET.line.cam_ok then
     local px, py, pz = pp:get()
     local dx = px - SET.line.cam_x
     local dz = pz - SET.line.cam_z
-    local angle_rad = math.atan2(dx, dz)
-    local angle_deg = math.floor((math.deg(angle_rad) + 360) % 360)
-    if rooms_browser and angle_deg ~= S.last_camera_angle then
-      S.last_camera_angle = angle_deg
-      rooms_browser:sendmessage("camera_angle:" .. tostring(angle_deg))
+    -- Degenerate only if the camera sits exactly on the player; atan2(0,0) would
+    -- report due north, which is the same lie cam_ok exists to prevent.
+    if math.abs(dx) + math.abs(dz) > 1 then
+      local angle_rad = math.atan2(dx, dz)
+      local angle_deg = math.floor((math.deg(angle_rad) + 360) % 360)
+      if rooms_browser and angle_deg ~= S.last_camera_angle then
+        S.last_camera_angle = angle_deg
+        rooms_browser:sendmessage("camera_angle:" .. tostring(angle_deg))
+      end
     end
   end
   -- ------------------------------------------
@@ -4814,6 +4945,15 @@ bolt.onswapbuffers(function (event)
   -- we're always working with the freshest catalog.
   process_room_observations()
   room_observations = {}
+  -- Room graph changed this frame (a room opened, a key icon appeared)? Push it
+  -- to the map NOW. The 4Hz dump below is a floor for staleness, not a ceiling
+  -- for responsiveness, and opening a room is precisely the moment the map is
+  -- being looked at.
+  local rfp = rooms_fingerprint()
+  if S.rooms_fp ~= rfp then
+    S.rooms_fp = rfp
+    S.rooms_kick = true
+  end
   S.keybag_tick = S.keybag_tick + 1
   _settings_poll_counter = _settings_poll_counter + 1
   if _settings_poll_counter >= 30 then
@@ -4862,14 +5002,15 @@ bolt.onswapbuffers(function (event)
     SET.res.dump_queue()
     SET.icons.dump_queue()
     dump_rooms()
-  elseif SET.parity_kick then
-    -- Event-driven repaint: an examine bind just changed parity evidence --
-    -- recompute and push to the rooms panel THIS swap instead of waiting out
-    -- the dump cadence. Idempotent: sends are hash-deduped, file writes
-    -- hash-gated, and kicks only fire on actual binds.
+  elseif SET.parity_kick or S.rooms_kick then
+    -- Event-driven repaint: an examine bind just changed parity evidence, or a
+    -- room just opened -- recompute and push to the rooms panel THIS swap
+    -- instead of waiting out the dump cadence. Idempotent: sends are
+    -- hash-deduped, file writes hash-gated, and kicks only fire on real changes.
     dump_rooms()
   end
   SET.parity_kick = nil
+  S.rooms_kick = nil
   -- (Pink outline around queued icons removed — the panel picker is the
   -- primary classification workflow now.)
   frame_sigs_ttl_counter = frame_sigs_ttl_counter + 1

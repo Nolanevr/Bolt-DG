@@ -81,7 +81,12 @@
     // ---- state --------------------------------------------------------------
     const keyMeshRaw = {}, keyAtlasImageData = {}, imgAtlasImageData = {}, iconCanvasCache = {};
     let heldKeys = new Set(), lastRooms = null, deadReason = "";
-    let cameraAngle = 0; // Tracks the FOV cone angle
+    // FOV cone bearing, degrees clockwise from north, or null while Lua has not
+    // sent one. NULL IS NOT ZERO: this started at 0, and 0 is due north, so a map
+    // that had never received an angle drew a confident north-facing cone no
+    // matter which way the camera was actually pointing. A direction we do not
+    // have is now no cone at all.
+    let cameraAngle = null;
     const COLORS = { gold:"#d4a03e", silver:"#c8c8c8", blue:"#4b7dc4", green:"#4b9c58",
       purple:"#8654a9", crimson:"#b04a4a", orange:"#d67c3c", yellow:"#e0c73e" };
     const SHAPE_NAMES = new Set(["triangle","rectangle","wedge","corner","pentagon","diamond","shield","crescent"]);
@@ -91,29 +96,40 @@
     //      fixed-px borders/shadows, %-based grid). {FONT} is substituted with
     //      the computed ? font size for the current edge. --------------------
     const CHROME_CSS = `
-      :root{--cell-empty:rgba(0,0,0,0.65);--cell-body:#916c33;--cell-base:#916c33;--cell-boss:#8a2a2a;
-        --cell-unopened:#3b2812;--par-unknown:#2e230d;--par-bonus:#24190d;--par-crit:#dab260;--accent:#ffcf6b;}
+      /* Room fills are the map's whole language, so they are ordered by how much
+         is KNOWN about a room, lightest to darkest: proven critical, opened but
+         unproven, proven bonus, still unopened. Values sampled off the reference
+         screenshot rather than picked by eye. --par-crit is the crit BORDER: a
+         gold ring, the one room state that gets a bright outline as well as a
+         bright fill. */
+      :root{--cell-empty:rgba(0,0,0,0.65);--cell-body:#8a663c;--cell-base:#8a663c;--cell-boss:#8a2a2a;
+        --cell-unopened:#4e3618;--par-unknown:#2e230d;--par-bonus:#24190d;--par-crit:#dab260;--accent:#ffcf6b;}
       *{box-sizing:border-box;}
       .grid{position:relative;background:rgba(0,0,0,0.65);display:grid;
-        grid-template-columns:repeat(8,1fr);grid-template-rows:repeat(8,1fr);gap:1.3%;padding:1.3%;}
+        grid-template-columns:repeat(8,1fr);grid-template-rows:repeat(8,1fr);gap:{GAP}%;padding:{GAP}%;}
       .cell{background:var(--cell-empty);border:3px solid transparent;border-radius:3px;
         position:relative;overflow:visible;}
+      /* Corridor stubs are sized FROM the grid gap, not hardcoded, so widening
+         the gap cannot leave two connected rooms looking disconnected: each stub
+         reaches {OUT}% of a cell past its own edge -- the whole gap plus a small
+         overlap -- and every stub meets its opposite number mid-gap. Change
+         GRID_GAP alone and the joins follow. */
       .corridor{position:absolute;background:inherit;z-index:0;border-radius:1px;}
-      .corridor.n{top:-17%;left:32%;width:36%;height:22%;}
-      .corridor.s{bottom:-17%;left:32%;width:36%;height:22%;}
-      .corridor.e{right:-17%;top:32%;height:36%;width:22%;}
-      .corridor.w{left:-17%;top:32%;height:36%;width:22%;}
+      .corridor.n{top:-{OUT}%;left:32%;width:36%;height:{SPAN}%;}
+      .corridor.s{bottom:-{OUT}%;left:32%;width:36%;height:{SPAN}%;}
+      .corridor.e{right:-{OUT}%;top:32%;height:36%;width:{SPAN}%;}
+      .corridor.w{left:-{OUT}%;top:32%;height:36%;width:{SPAN}%;}
       .cell.body{background:var(--cell-body);border-style:double;}
       .cell.base{background:var(--cell-base);border-style:double;}
       .cell.boss{background:var(--cell-boss);border-style:double;}
-      .cell.unopened{background:var(--cell-unopened);border-style:double;box-shadow:inset 0 0 10px 4px rgba(0,0,0,0.85);}
+      .cell.unopened{background:var(--cell-unopened);border-style:double;}
       .cell.unopened.par-bonus{border-style:dashed;}
       .cell.par-unknown{border-color:var(--par-unknown);}
       .cell.par-bonus{border-color:var(--par-bonus);}
       .cell.par-crit{border-color:var(--par-crit);border-style:double;}
-      .cell.par-bonus.body,.cell.par-bonus.base,.cell.par-bonus.boss{background:#6b522b;}
-      .cell.par-bonus.unopened{background:#281b0a;}
-      .cell.par-crit.body,.cell.par-crit.base,.cell.par-crit.boss,.cell.par-crit.unopened{background:#a67c38;}
+      .cell.par-bonus.body,.cell.par-bonus.base,.cell.par-bonus.boss{background:#785a30;}
+      .cell.par-bonus.unopened{background:#3a2811;}
+      .cell.par-crit.body,.cell.par-crit.base,.cell.par-crit.boss,.cell.par-crit.unopened{background:#a8844e;}
       .cell.unopened .corridor.n{background-image:linear-gradient(to top,rgba(0,0,0,0.6),transparent 65%);}
       .cell.unopened .corridor.s{background-image:linear-gradient(to bottom,rgba(0,0,0,0.6),transparent 65%);}
       .cell.unopened .corridor.e{background-image:linear-gradient(to right,rgba(0,0,0,0.6),transparent 65%);}
@@ -128,10 +144,27 @@
     `;
 
     // ---- layout geometry for edge E (matches the %-based CSS grid) ----------
+    // GRID_GAP is the one knob for how much air sits between rooms: it is both
+    // the grid gap and the outer padding, as a fraction of the map edge. Rooms
+    // shrink as it grows (the 8 cells split whatever is left), which is the
+    // point -- separated rooms read as separate at a glance. The CSS gap and the
+    // corridor-stub lengths are both generated from it, so the two can never
+    // drift apart.
+    const GRID_GAP = 0.030;
     const geom = (E) => {
-      const pad = 0.013 * E, gap = 0.013 * E;
+      const pad = GRID_GAP * E, gap = GRID_GAP * E;
       const cell = (E - 2 * pad - 7 * gap) / 8;
       return { pad, gap, cell, step: cell + gap };
+    };
+    // Stub geometry as percentages of a CELL. A stub must cross the whole gap
+    // and then bite into the neighbour, or a connection reads as a break; the
+    // overlap is what the original hardcoded 17%/22% pair amounted to at the old
+    // 1.3% gap, kept here as a ratio so it survives any GRID_GAP.
+    const CORRIDOR_OVERLAP = 5.2, CORRIDOR_INSET = 5;
+    const corridorRatios = () => {
+      const g = geom(1);
+      const out = (g.gap / g.cell) * 100 + CORRIDOR_OVERLAP;
+      return { out: out.toFixed(1), span: (out + CORRIDOR_INSET).toFixed(1) };
     };
 
     // ---- atlas + mesh machinery (unchanged from the canvas pipeline) --------
@@ -318,21 +351,39 @@
       ctx.drawImage(canvas, cx - dw/2, cy - dh/2, dw, dh);
       ctx.imageSmoothingEnabled = true;
     };
-    // Exact match to the original CSS `filter: drop-shadow(4cqw 7cqw 4cqw
-    // rgba(0,0,0,0.9))`. ctx.filter is the SAME filter primitive Blink uses for
-    // CSS drop-shadow (unlike ctx.shadow*, which renders heavier), so this
-    // reproduces the panel's icon shadow. cqw = the icon cell's content-box
-    // width (~0.76*cell), so 4/7/4 cqw ~= 3.0/5.3/3.0% of the cell.
+    // The panel's icon shadow, matching the original CSS `filter: drop-shadow(
+    // 4cqw 7cqw 4cqw rgba(0,0,0,0.9))`. cqw = the icon cell's content-box width
+    // (~0.76*cell), so 4/7/4 cqw ~= 3.0/5.3/3.0% of the cell.
+    //
+    // ctx.shadow*, NOT ctx.filter. This used to set ctx.filter on the grounds
+    // that it is the same primitive Blink uses for CSS drop-shadow while
+    // "ctx.shadow* renders heavier". Measured, that is backwards by more than
+    // two orders of magnitude: drawing under ctx.filter costs ~20ms PER ICON,
+    // and the bill arrives at the next getImageData, which is where the whole
+    // export blocked. Setting the filter is free; drawing beneath it is not.
+    // Twelve icons cost 263ms via ctx.filter and 0.9ms via ctx.shadow*, so the
+    // repaint that feeds the map surface went from ~13/s to frame rate. The two
+    // shadows are visually equivalent -- both blur the alpha silhouette, and
+    // canvas shadowBlur and CSS blur-radius use the same 2-sigma convention.
     const iconShadow = (on, cell) => {
       if (on) {
-        const ox = (0.030 * cell).toFixed(2), oy = (0.053 * cell).toFixed(2), bl = (0.030 * cell).toFixed(2);
-        ctx.filter = "drop-shadow(" + ox + "px " + oy + "px " + bl + "px rgba(0,0,0,0.9))";
+        ctx.shadowColor   = "rgba(0,0,0,0.9)";
+        ctx.shadowOffsetX = 0.030 * cell;
+        ctx.shadowOffsetY = 0.053 * cell;
+        ctx.shadowBlur    = 0.030 * cell;
       } else {
-        ctx.filter = "none";
+        ctx.shadowColor   = "transparent";
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = 0;
+        ctx.shadowBlur    = 0;
       }
     };
     const compositeIcons = (rooms, E) => {
       const g = geom(E);
+      // Callers pass the DEVICE-pixel edge, so `E` here is RE, not the logical
+      // EDGE. Strokes authored in logical px need this factor (the corridor pass
+      // in drawMapLayers uses the same one).
+      const RE_SCALE = E / EDGE;
       const playerDraws = [];   // deferred: player markers draw LAST, above all cells
       for (const r of rooms) {
         if (r.gx<0||r.gx>7||r.gz<0||r.gz>7) continue;
@@ -358,7 +409,13 @@
             else if (name.startsWith("DOOR_")) { c=imgIcon(name); tw=(nN===1?0.62:0.4)*g.cell; }
             else { c=keyIcon(name); tw=(nN===1?0.8:0.5)*g.cell; }
             if (c) drawFit(c, mx, cy, tw, name.charAt(0)!=="I" && !name.startsWith("DOOR_"));
-            else { ctx.shadowColor="transparent"; ctx.fillStyle="#888"; ctx.fillRect(mx-0.18*g.cell, cy-0.18*g.cell, 0.36*g.cell, 0.36*g.cell); }
+            // Missing-icon placeholder: deliberately unshadowed, but the clear
+            // has to be UNDONE or every later icon in this room loses its
+            // shadow too. Harmless while the shadow lived on ctx.filter (this
+            // line did nothing then); live now that it is ctx.shadowColor.
+            else { const _sc = ctx.shadowColor; ctx.shadowColor = "transparent";
+                   ctx.fillStyle="#888"; ctx.fillRect(mx-0.18*g.cell, cy-0.18*g.cell, 0.36*g.cell, 0.36*g.cell);
+                   ctx.shadowColor = _sc; }
           }
           iconShadow(false, g.cell);
         }
@@ -391,19 +448,29 @@
             const cx = d.x0 + g.cell / 2;
             const cy = d.y0 + g.cell / 2;
             
-            const angleRad = ((cameraAngle || 0) - 90) * (Math.PI / 180); 
-            const fov = Math.PI / 2.5; 
-            const radius = 1.2 * g.cell; 
-            
+            // cameraAngle is a compass bearing (0 = north, 90 = east); canvas
+            // angles run from +x with y downward, so north is -90 degrees.
+            if (Number.isFinite(cameraAngle)) {
+            const angleRad = (cameraAngle - 90) * (Math.PI / 180);
+            const fov = Math.PI / 2.5;
+            const radius = 1.2 * g.cell;
+
             ctx.beginPath();
             ctx.moveTo(cx, cy);
             ctx.arc(cx, cy, radius, angleRad - fov/2, angleRad + fov/2);
             ctx.closePath();
-            ctx.fillStyle = "rgba(0, 255, 255, 0.30)"; 
+            // White, not cyan: cyan is the corridor colour, and a cyan cone sat
+            // on top of the corridors it overlaps read as more corridor. White
+            // is the one hue the map does not otherwise use.
+            ctx.fillStyle = "rgba(255, 255, 255, 0.28)";
             ctx.fill();
-            ctx.strokeStyle = "rgba(0, 255, 255, 0.70)"; 
-            ctx.lineWidth = 1.5;
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.95)";
+            // Scaled like every other stroke here. A bare 1.5 is DEVICE pixels,
+            // so on a HiDPI render the outline came out half the width of a
+            // corridor instead of matching it.
+            ctx.lineWidth = Math.max(1, 1.5 * (RE_SCALE));
             ctx.stroke();
+            }
           }
         }
 
@@ -464,16 +531,31 @@
       } catch (e) { post("render_err:getImageData " + (e.message||e)); }
     };
 
-    let fastPending = false;
+    // Angle-only repaints (the FOV cone) skip the SVG round trip and just
+    // redraw the layers. Two limits, for different reasons:
+    //   - coalesced to one per animation frame, so a burst of camera_angle
+    //     messages during a fast spin cannot queue up a repaint each;
+    //   - and capped to FAST_MIN_MS, because every repaint exports the WHOLE
+    //     surface to Lua -- 0.56MB at the default edge, 2.2MB at a large map on
+    //     a HiDPI screen. Uncapped that is ~130MB/s of pixels crossing the
+    //     message channel and being re-uploaded as a texture, for a cone that
+    //     reads as perfectly smooth at 30Hz. Raise it if the cone ever looks
+    //     steppy; the repaint itself costs ~2ms and is not the constraint.
+    const FAST_MIN_MS = 33;
+    let fastPending = false, lastFastMs = 0;
     const fastRepaint = () => {
       if (cachedSvgImg && !rendering) {
-        if (!fastPending) {
-          fastPending = true;
-          requestAnimationFrame(() => {
-            fastPending = false;
-            drawMapLayers(cachedSvgImg);
-          });
-        }
+        if (fastPending) return;
+        fastPending = true;
+        const step = () => {
+          if (rendering) { fastPending = false; return; }
+          const now = performance.now();
+          if (now - lastFastMs < FAST_MIN_MS) { requestAnimationFrame(step); return; }
+          lastFastMs = now;
+          fastPending = false;
+          drawMapLayers(cachedSvgImg);
+        };
+        requestAnimationFrame(step);
       } else if (!rendering) {
         repaint();
       }
@@ -483,7 +565,12 @@
       if (rendering) { dirty = true; return; }
       rendering = true; dirty = false;
       const E = EDGE, RE = renderEdge(), gE = geom(E);
-      const css = CHROME_CSS.replace("{FONT}", (0.646 * gE.cell).toFixed(1));
+      const cr = corridorRatios();
+      const css = CHROME_CSS
+        .split("{FONT}").join((0.646 * gE.cell).toFixed(1))
+        .split("{GAP}").join((GRID_GAP * 100).toFixed(1))
+        .split("{OUT}").join(cr.out)
+        .split("{SPAN}").join(cr.span);
       const chrome = lastRooms ? buildChromeHTML(lastRooms, E) : ('<div class="grid" style="width:'+E+'px;height:'+E+'px"></div>');
       const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="'+RE+'" height="'+RE+'" viewBox="0 0 '+E+' '+E+'">' +
         '<foreignObject width="'+E+'" height="'+E+'">' +
