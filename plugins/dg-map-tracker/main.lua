@@ -710,6 +710,8 @@ local function wipe_floor_state()
   S.key_match_seen     = nil     -- ground-key match tuning log (dev)
   S.key_match_log      = nil
   S.guardian_seen      = nil     -- guardian-door detections (sticky per floor)
+  S.guardian_pend      = nil     -- tolerant hits awaiting a second-frame confirm
+  S.guardian_miss      = nil     -- guardian-n meshes that matched nothing (dev)
   S.guardian_log       = nil
   S.base_cell          = nil     -- first base cell seen this floor (parity guard)
   keys_state = {}
@@ -3604,12 +3606,13 @@ bolt.onrender3d(function (event)
     if pp then f3d.px, f3d.py, f3d.pz = pp:get() end
     S.f3d = f3d
     sr_view_proj = f3d.vp
-    if f3d.cx and f3d.px then 
-          -- Prevent UI/Skybox cameras from hijacking the angle
-          if (math.abs(f3d.cx - f3d.px) + math.abs(f3d.cz - f3d.pz)) < 15000 then
-            SET.line.cam_x, SET.line.cam_y, SET.line.cam_z = f3d.cx, f3d.cy, f3d.cz 
-          end
-        end
+    if f3d.cx and f3d.px then
+      -- Prevent UI/Skybox cameras from hijacking the angle
+      if (math.abs(f3d.cx - f3d.px) + math.abs(f3d.cz - f3d.pz)) < 15000 then
+        SET.line.cam_x, SET.line.cam_y, SET.line.cam_z = f3d.cx, f3d.cy, f3d.cz
+      end
+    end
+  end
   -- Scan-frame gate FIRST: 11/12 frames are non-scan, so return here with the
   -- fewest per-mesh ops. The detection below is all of STATIC things
   -- (resources / ground keys don't move), so the shared ~5Hz cadence loses
@@ -3627,7 +3630,13 @@ bolt.onrender3d(function (event)
   -- BEFORE paying for the position read.
   local mn = event:vertexcount()
   local is_key_n = SET.icons.by_n(mn) ~= nil
-  if not SET.scan_frame and not is_key_n then return end
+  -- Guardian doors run EVERY frame too, for the same reason keys do: detection
+  -- is sticky per floor, so every extra frame is another chance to catch the
+  -- door on a draw the entity-border highlight has not repainted. The gate is a
+  -- table lookup on a vertexcount we already have, and guardian counts are
+  -- exclusive, so non-guardian meshes pay nothing for it.
+  local is_guardian_n = SET.res.guardian_n and SET.res.guardian_n(mn) or false
+  if not SET.scan_frame and not is_key_n and not is_guardian_n then return end
   -- Per-mesh world position (needed for the scan-range cull below).
   local ok, wp = pcall(ORIGIN_PT.transform, ORIGIN_PT, event:modelmatrix())
   if not ok or not wp then return end
@@ -3655,6 +3664,63 @@ bolt.onrender3d(function (event)
       }
       return
     end
+  end
+
+  -- ==== GUARDIAN DOORS =======================================================
+  -- A separate 3D-mesh catalog (guardian_doors.txt). Matched meshes are recorded
+  -- (sticky per floor) as world positions; the door-highlight pass forward-matches
+  -- them to door wall-centres.
+  --
+  -- Placed HERE, ahead of the scan-range cull, for the reason the ghost block
+  -- above is: a guardian door is room structure, not scenery you walk up to, and
+  -- the door-highlight pass it feeds already draws the whole 3x3 room block. Culled
+  -- to the resource scan box it could only ever register once you were standing at
+  -- the door, and a narrowed scan_range_tiles setting silently turned it off.
+  --
+  -- A tolerant match (see resources.lua guardian_hit) is what lets a door still be
+  -- read while RuneScape's entity-border highlighting is repainting it, and it must
+  -- be seen on TWO SEPARATE FRAMES at the same tile before it sticks -- f3d is
+  -- rebuilt once per frame, so its table identity is the frame token. A one-frame
+  -- artefact of the border pass cannot mint a door on its own; an unhighlighted
+  -- door ("exact") still binds on sight, as it always did.
+  if is_guardian_n then
+    local gname, gscore, gmode = SET.res.guardian_hit(event, mn)
+    if gname then
+      local gtx, gtz = math.floor(wx / RES_TILE_UNITS), math.floor(wz / RES_TILE_UNITS)
+      local gk = gtx .. "," .. gtz
+      S.guardian_seen = S.guardian_seen or {}
+      if not S.guardian_seen[gk] then
+        S.guardian_pend = S.guardian_pend or {}
+        local confirmed = (gmode == "exact")
+          or (S.guardian_pend[gk] ~= nil and S.guardian_pend[gk] ~= f3d)
+        if confirmed then
+          S.guardian_seen[gk] = { wx = wx, wz = wz, mode = gmode }
+          if SET.DEV then
+            S.guardian_log = (S.guardian_log or "") .. string.format(
+              "%s at world %d,%d  (tile %d,%d)  mode=%s score=%d\n",
+              gname, math.floor(wx), math.floor(wz), gtx, gtz, gmode, math.floor(gscore or -1))
+            SET.dev_save("guardian_diag.txt", S.guardian_log)
+          end
+        else
+          S.guardian_pend[gk] = f3d
+        end
+      end
+    elseif SET.DEV then
+      -- Near-misses are the whole diagnostic story for "highlighting on and the
+      -- door went unread": one line per vertexcount per floor with the best score.
+      S.guardian_miss = S.guardian_miss or {}
+      if not S.guardian_miss[mn] then
+        S.guardian_miss[mn] = true
+        S.guardian_log = (S.guardian_log or "") .. string.format(
+          "MISS n=%d best=%d\n", mn, math.floor(gscore or -1))
+        SET.dev_save("guardian_diag.txt", S.guardian_log)
+      end
+    end
+    -- RETURN whether or not the fingerprint matched. Guardian vertexcounts are
+    -- exclusive -- no resource, icon or ghost print shares one -- so a door the
+    -- border highlight pushed past every tier must still never fall through into
+    -- the resource matcher, where it would queue as an unknown or bind a sighting.
+    return
   end
 
   -- Runecraft Tiles puzzle: every n=4644 mesh is one tile. Same placement
@@ -3831,27 +3897,6 @@ bolt.onrender3d(function (event)
 
   -- ==== RESOURCE DETECTION (5Hz only; cosmetic, latency-tolerant) ===========
   if not SET.scan_frame then return end
-  -- Guardian doors: a separate 3D-mesh catalog (guardian_doors.txt). Detected
-  -- meshes are recorded (sticky per floor) as world positions; the door-highlight
-  -- pass forward-matches them to door wall-centres. Strict match, one print per
-  -- floor. Skip the resource path afterwards so a guardian never queues/binds.
-  if SET.res.guardian_n and SET.res.guardian_n(mn) then
-    local gname = SET.res.guardian_hit(event, mn)
-    if gname then
-      local gtx, gtz = math.floor(wx / RES_TILE_UNITS), math.floor(wz / RES_TILE_UNITS)
-      local gk = gtx .. "," .. gtz
-      S.guardian_seen = S.guardian_seen or {}
-      if not S.guardian_seen[gk] then
-        S.guardian_seen[gk] = { wx = wx, wz = wz }
-        if SET.DEV then
-          S.guardian_log = (S.guardian_log or "") .. string.format(
-            "%s at world %d,%d  (tile %d,%d)\n", gname, math.floor(wx), math.floor(wz), gtx, gtz)
-          SET.dev_save("guardian_diag.txt", S.guardian_log)
-        end
-      end
-      return
-    end
-  end
   -- Fingerprint memo: (tile,vertexcount) -> key | false, so static meshes are
   -- not re-sampled every scan; classify + bind still run each scan from the key.
   local mkey = mtx .. ":" .. mtz .. ":" .. mn

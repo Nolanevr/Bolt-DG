@@ -54,6 +54,32 @@ Runtime catalog data stays in its own files (`icons.txt`,
 `img_signatures.txt`, `resources.txt`, `img_ignored.txt`, etc.) --
 those are large / append-heavy and don't fit the flat-JSON shape.
 
+## Guardian doors
+
+Guardian doors are recognised from a 3D-mesh fingerprint
+(`guardian_doors.txt`, one print per floor type) and painted magenta,
+with a second red outline on every other door of the same room until
+the `?` room behind them is opened.
+
+**RuneScape's own entity highlighting can be left on.** The border pass
+repaints a highlighted door's vertex colours -- and when the border
+clips through the door it can hand the plugin the border's inflated
+copy of the mesh instead of the door itself -- which used to push the
+door past a colour-equality test and leave it unread. Matching now
+leads with geometry and lets colour corroborate, in three tiers:
+
+| Tier | Accepts when | Covers |
+|------|--------------|--------|
+| `exact` | the original strict position + colour test | an unhighlighted door |
+| `tinted` | geometry matches under one uniform scale, and colours match up to a per-channel gain + offset | border tint, lighting drift, an inflated outline copy |
+| `flooded` | geometry matches tightly and the border has left no colour signal at all | a door washed flat or saturated by the highlight |
+
+The two tolerant tiers give up some colour evidence, so a hit from
+either must be seen on two separate frames at the same tile before it
+sticks; an `exact` hit still binds on sight. Detection also runs every
+frame and is not culled by the resource scan range -- a guardian door
+is room structure, not scenery you walk up to.
+
 ## Diagnostics
 
 Always on. The plugin writes state files into its config dir
@@ -62,6 +88,11 @@ Always on. The plugin writes state files into its config dir
 the first place to look when something silently stops tracking --
 `draw_dbg.txt`'s `floor_gate:` / `gates:` / `anchor=` lines in
 particular.
+
+With dev tools on, `guardian_diag.txt` logs each guardian door as it
+binds (with the tier and score that bound it) and one `MISS` line per
+vertexcount that reached the matcher and failed -- the score on that
+line says how far off the print it was.
 
 ## Panels
 
