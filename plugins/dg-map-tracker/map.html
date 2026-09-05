@@ -81,7 +81,12 @@
     // ---- state --------------------------------------------------------------
     const keyMeshRaw = {}, keyAtlasImageData = {}, imgAtlasImageData = {}, iconCanvasCache = {};
     let heldKeys = new Set(), lastRooms = null, deadReason = "";
-    let cameraAngle = 0; // Tracks the FOV cone angle
+    // FOV cone bearing, degrees clockwise from north, or null while Lua has not
+    // sent one. NULL IS NOT ZERO: this started at 0, and 0 is due north, so a map
+    // that had never received an angle drew a confident north-facing cone no
+    // matter which way the camera was actually pointing. A direction we do not
+    // have is now no cone at all.
+    let cameraAngle = null;
     const COLORS = { gold:"#d4a03e", silver:"#c8c8c8", blue:"#4b7dc4", green:"#4b9c58",
       purple:"#8654a9", crimson:"#b04a4a", orange:"#d67c3c", yellow:"#e0c73e" };
     const SHAPE_NAMES = new Set(["triangle","rectangle","wedge","corner","pentagon","diamond","shield","crescent"]);
@@ -91,8 +96,16 @@
     //      fixed-px borders/shadows, %-based grid). {FONT} is substituted with
     //      the computed ? font size for the current edge. --------------------
     const CHROME_CSS = `
-      :root{--cell-empty:rgba(0,0,0,0.65);--cell-body:#916c33;--cell-base:#916c33;--cell-boss:#8a2a2a;
-        --cell-unopened:#3b2812;--par-unknown:#2e230d;--par-bonus:#24190d;--par-crit:#dab260;--accent:#ffcf6b;}
+      /* Room fills are the map's whole language, so they are ordered by how much
+         is KNOWN about a room, lightest to darkest: proven critical, opened but
+         unproven, proven bonus, still unopened. Values sampled off the reference
+         screenshot rather than picked by eye.
+         --par-crit is the crit BORDER: it used to be #dab260, a bright gold ring
+         that read as the loudest thing on the map and fought the fill it sat on.
+         The fill already says "critical"; the border is dark like every other
+         room's so the fills are what the eye sorts by. */
+      :root{--cell-empty:rgba(0,0,0,0.65);--cell-body:#8a663c;--cell-base:#8a663c;--cell-boss:#8a2a2a;
+        --cell-unopened:#4e3618;--par-unknown:#2e230d;--par-bonus:#24190d;--par-crit:#3a2b12;--accent:#ffcf6b;}
       *{box-sizing:border-box;}
       .grid{position:relative;background:rgba(0,0,0,0.65);display:grid;
         grid-template-columns:repeat(8,1fr);grid-template-rows:repeat(8,1fr);gap:1.3%;padding:1.3%;}
@@ -106,14 +119,14 @@
       .cell.body{background:var(--cell-body);border-style:double;}
       .cell.base{background:var(--cell-base);border-style:double;}
       .cell.boss{background:var(--cell-boss);border-style:double;}
-      .cell.unopened{background:var(--cell-unopened);border-style:double;box-shadow:inset 0 0 10px 4px rgba(0,0,0,0.85);}
+      .cell.unopened{background:var(--cell-unopened);border-style:double;}
       .cell.unopened.par-bonus{border-style:dashed;}
       .cell.par-unknown{border-color:var(--par-unknown);}
       .cell.par-bonus{border-color:var(--par-bonus);}
       .cell.par-crit{border-color:var(--par-crit);border-style:double;}
-      .cell.par-bonus.body,.cell.par-bonus.base,.cell.par-bonus.boss{background:#6b522b;}
-      .cell.par-bonus.unopened{background:#281b0a;}
-      .cell.par-crit.body,.cell.par-crit.base,.cell.par-crit.boss,.cell.par-crit.unopened{background:#a67c38;}
+      .cell.par-bonus.body,.cell.par-bonus.base,.cell.par-bonus.boss{background:#785a30;}
+      .cell.par-bonus.unopened{background:#3a2811;}
+      .cell.par-crit.body,.cell.par-crit.base,.cell.par-crit.boss,.cell.par-crit.unopened{background:#a8844e;}
       .cell.unopened .corridor.n{background-image:linear-gradient(to top,rgba(0,0,0,0.6),transparent 65%);}
       .cell.unopened .corridor.s{background-image:linear-gradient(to bottom,rgba(0,0,0,0.6),transparent 65%);}
       .cell.unopened .corridor.e{background-image:linear-gradient(to right,rgba(0,0,0,0.6),transparent 65%);}
@@ -333,6 +346,10 @@
     };
     const compositeIcons = (rooms, E) => {
       const g = geom(E);
+      // Callers pass the DEVICE-pixel edge, so `E` here is RE, not the logical
+      // EDGE. Strokes authored in logical px need this factor (the corridor pass
+      // in drawMapLayers uses the same one).
+      const RE_SCALE = E / EDGE;
       const playerDraws = [];   // deferred: player markers draw LAST, above all cells
       for (const r of rooms) {
         if (r.gx<0||r.gx>7||r.gz<0||r.gz>7) continue;
@@ -391,19 +408,29 @@
             const cx = d.x0 + g.cell / 2;
             const cy = d.y0 + g.cell / 2;
             
-            const angleRad = ((cameraAngle || 0) - 90) * (Math.PI / 180); 
-            const fov = Math.PI / 2.5; 
-            const radius = 1.2 * g.cell; 
-            
+            // cameraAngle is a compass bearing (0 = north, 90 = east); canvas
+            // angles run from +x with y downward, so north is -90 degrees.
+            if (Number.isFinite(cameraAngle)) {
+            const angleRad = (cameraAngle - 90) * (Math.PI / 180);
+            const fov = Math.PI / 2.5;
+            const radius = 1.2 * g.cell;
+
             ctx.beginPath();
             ctx.moveTo(cx, cy);
             ctx.arc(cx, cy, radius, angleRad - fov/2, angleRad + fov/2);
             ctx.closePath();
-            ctx.fillStyle = "rgba(0, 255, 255, 0.30)"; 
+            // White, not cyan: cyan is the corridor colour, and a cyan cone sat
+            // on top of the corridors it overlaps read as more corridor. White
+            // is the one hue the map does not otherwise use.
+            ctx.fillStyle = "rgba(255, 255, 255, 0.28)";
             ctx.fill();
-            ctx.strokeStyle = "rgba(0, 255, 255, 0.70)"; 
-            ctx.lineWidth = 1.5;
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.95)";
+            // Scaled like every other stroke here. A bare 1.5 is DEVICE pixels,
+            // so on a HiDPI render the outline came out half the width of a
+            // corridor instead of matching it.
+            ctx.lineWidth = Math.max(1, 1.5 * (RE_SCALE));
             ctx.stroke();
+            }
           }
         }
 

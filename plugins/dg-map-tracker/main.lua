@@ -2807,6 +2807,13 @@ LD.key_order       = 0
 -- re-logged. Cleared on floor change alongside key_log.
 LD.collected       = {}
 LD.cam_x, LD.cam_y, LD.cam_z = 0, 0, 0
+-- The billboard maths needs three numbers from frame one, so cam_* seed to the
+-- world ORIGIN rather than nil -- and 0 is truthy in Lua, so `if LD.cam_x then`
+-- is true before any camera has been sampled. cam_ok is the honest test: false
+-- until a real camera position lands. Only the FOV-cone bearing consults it; a
+-- bearing measured from the world origin is not a camera direction, it is the
+-- player's map position dressed up as one.
+LD.cam_ok = false
 do
   local c = SET.get("line_color", { 255, 70, 70, 255 })
   LD.cr, LD.cg, LD.cb, LD.ca = c[1], c[2], c[3], c[4]
@@ -3610,6 +3617,7 @@ bolt.onrender3d(function (event)
       -- Prevent UI/Skybox cameras from hijacking the angle
       if (math.abs(f3d.cx - f3d.px) + math.abs(f3d.cz - f3d.pz)) < 15000 then
         SET.line.cam_x, SET.line.cam_y, SET.line.cam_z = f3d.cx, f3d.cy, f3d.cz
+        SET.line.cam_ok = true
       end
     end
   end
@@ -4621,16 +4629,24 @@ end
 
 bolt.onswapbuffers(function (event)
   -- --- NEW: Camera angle for the FOV cone ---
+  -- Bearing of the player as seen FROM the camera, i.e. the direction the camera
+  -- is looking: 0 = north, 90 = east. map.html turns it into the FOV cone.
+  -- Gated on cam_ok, not on cam_x: see the LD.cam_ok note. Until a real camera
+  -- lands nothing is sent, and the map draws no cone rather than a false one.
   local pp = bolt.playerposition()
-  if pp and SET.line.cam_x then
+  if pp and SET.line.cam_ok then
     local px, py, pz = pp:get()
     local dx = px - SET.line.cam_x
     local dz = pz - SET.line.cam_z
-    local angle_rad = math.atan2(dx, dz)
-    local angle_deg = math.floor((math.deg(angle_rad) + 360) % 360)
-    if rooms_browser and angle_deg ~= S.last_camera_angle then
-      S.last_camera_angle = angle_deg
-      rooms_browser:sendmessage("camera_angle:" .. tostring(angle_deg))
+    -- Degenerate only if the camera sits exactly on the player; atan2(0,0) would
+    -- report due north, which is the same lie cam_ok exists to prevent.
+    if math.abs(dx) + math.abs(dz) > 1 then
+      local angle_rad = math.atan2(dx, dz)
+      local angle_deg = math.floor((math.deg(angle_rad) + 360) % 360)
+      if rooms_browser and angle_deg ~= S.last_camera_angle then
+        S.last_camera_angle = angle_deg
+        rooms_browser:sendmessage("camera_angle:" .. tostring(angle_deg))
+      end
     end
   end
   -- ------------------------------------------
