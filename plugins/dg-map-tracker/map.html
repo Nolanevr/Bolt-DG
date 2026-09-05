@@ -351,17 +351,31 @@
       ctx.drawImage(canvas, cx - dw/2, cy - dh/2, dw, dh);
       ctx.imageSmoothingEnabled = true;
     };
-    // Exact match to the original CSS `filter: drop-shadow(4cqw 7cqw 4cqw
-    // rgba(0,0,0,0.9))`. ctx.filter is the SAME filter primitive Blink uses for
-    // CSS drop-shadow (unlike ctx.shadow*, which renders heavier), so this
-    // reproduces the panel's icon shadow. cqw = the icon cell's content-box
-    // width (~0.76*cell), so 4/7/4 cqw ~= 3.0/5.3/3.0% of the cell.
+    // The panel's icon shadow, matching the original CSS `filter: drop-shadow(
+    // 4cqw 7cqw 4cqw rgba(0,0,0,0.9))`. cqw = the icon cell's content-box width
+    // (~0.76*cell), so 4/7/4 cqw ~= 3.0/5.3/3.0% of the cell.
+    //
+    // ctx.shadow*, NOT ctx.filter. This used to set ctx.filter on the grounds
+    // that it is the same primitive Blink uses for CSS drop-shadow while
+    // "ctx.shadow* renders heavier". Measured, that is backwards by more than
+    // two orders of magnitude: drawing under ctx.filter costs ~20ms PER ICON,
+    // and the bill arrives at the next getImageData, which is where the whole
+    // export blocked. Setting the filter is free; drawing beneath it is not.
+    // Twelve icons cost 263ms via ctx.filter and 0.9ms via ctx.shadow*, so the
+    // repaint that feeds the map surface went from ~13/s to frame rate. The two
+    // shadows are visually equivalent -- both blur the alpha silhouette, and
+    // canvas shadowBlur and CSS blur-radius use the same 2-sigma convention.
     const iconShadow = (on, cell) => {
       if (on) {
-        const ox = (0.030 * cell).toFixed(2), oy = (0.053 * cell).toFixed(2), bl = (0.030 * cell).toFixed(2);
-        ctx.filter = "drop-shadow(" + ox + "px " + oy + "px " + bl + "px rgba(0,0,0,0.9))";
+        ctx.shadowColor   = "rgba(0,0,0,0.9)";
+        ctx.shadowOffsetX = 0.030 * cell;
+        ctx.shadowOffsetY = 0.053 * cell;
+        ctx.shadowBlur    = 0.030 * cell;
       } else {
-        ctx.filter = "none";
+        ctx.shadowColor   = "transparent";
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = 0;
+        ctx.shadowBlur    = 0;
       }
     };
     const compositeIcons = (rooms, E) => {
@@ -395,7 +409,13 @@
             else if (name.startsWith("DOOR_")) { c=imgIcon(name); tw=(nN===1?0.62:0.4)*g.cell; }
             else { c=keyIcon(name); tw=(nN===1?0.8:0.5)*g.cell; }
             if (c) drawFit(c, mx, cy, tw, name.charAt(0)!=="I" && !name.startsWith("DOOR_"));
-            else { ctx.shadowColor="transparent"; ctx.fillStyle="#888"; ctx.fillRect(mx-0.18*g.cell, cy-0.18*g.cell, 0.36*g.cell, 0.36*g.cell); }
+            // Missing-icon placeholder: deliberately unshadowed, but the clear
+            // has to be UNDONE or every later icon in this room loses its
+            // shadow too. Harmless while the shadow lived on ctx.filter (this
+            // line did nothing then); live now that it is ctx.shadowColor.
+            else { const _sc = ctx.shadowColor; ctx.shadowColor = "transparent";
+                   ctx.fillStyle="#888"; ctx.fillRect(mx-0.18*g.cell, cy-0.18*g.cell, 0.36*g.cell, 0.36*g.cell);
+                   ctx.shadowColor = _sc; }
           }
           iconShadow(false, g.cell);
         }
@@ -511,16 +531,31 @@
       } catch (e) { post("render_err:getImageData " + (e.message||e)); }
     };
 
-    let fastPending = false;
+    // Angle-only repaints (the FOV cone) skip the SVG round trip and just
+    // redraw the layers. Two limits, for different reasons:
+    //   - coalesced to one per animation frame, so a burst of camera_angle
+    //     messages during a fast spin cannot queue up a repaint each;
+    //   - and capped to FAST_MIN_MS, because every repaint exports the WHOLE
+    //     surface to Lua -- 0.56MB at the default edge, 2.2MB at a large map on
+    //     a HiDPI screen. Uncapped that is ~130MB/s of pixels crossing the
+    //     message channel and being re-uploaded as a texture, for a cone that
+    //     reads as perfectly smooth at 30Hz. Raise it if the cone ever looks
+    //     steppy; the repaint itself costs ~2ms and is not the constraint.
+    const FAST_MIN_MS = 33;
+    let fastPending = false, lastFastMs = 0;
     const fastRepaint = () => {
       if (cachedSvgImg && !rendering) {
-        if (!fastPending) {
-          fastPending = true;
-          requestAnimationFrame(() => {
-            fastPending = false;
-            drawMapLayers(cachedSvgImg);
-          });
-        }
+        if (fastPending) return;
+        fastPending = true;
+        const step = () => {
+          if (rendering) { fastPending = false; return; }
+          const now = performance.now();
+          if (now - lastFastMs < FAST_MIN_MS) { requestAnimationFrame(step); return; }
+          lastFastMs = now;
+          fastPending = false;
+          drawMapLayers(cachedSvgImg);
+        };
+        requestAnimationFrame(step);
       } else if (!rendering) {
         repaint();
       }

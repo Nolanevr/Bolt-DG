@@ -116,6 +116,34 @@ means a *proven* dead end, not a guess.
 With dev tools on, `pathing_diag.txt` lists the top frontier doors with their
 score breakdown, so the marker can be audited rather than trusted.
 
+## Map render cost
+
+The map is rendered in an off-DOM canvas and the whole surface is exported to
+Lua on every repaint, so repaint cost is the map's latency. Two numbers worth
+knowing if you touch that path (measured in headless Chromium, 17-room floor):
+
+| | before | after |
+|---|---|---|
+| repaint (drives the FOV cone) | 75 ms -> ~13/s | 2.2 ms -> capped 30/s |
+| room opens -> pixels exported | 76 ms | 7 ms |
+
+Both had the same cause: icon shadows were drawn under `ctx.filter:
+drop-shadow(...)`. *Setting* a canvas filter is free; *drawing* beneath one
+costs ~20 ms per icon, and the bill arrives at the next `getImageData` -- so
+the export, not the drawing, appeared to be slow. `ctx.shadow*` is the same
+effect about 290x cheaper.
+
+Angle-only repaints are coalesced to one per animation frame and capped
+(`FAST_MIN_MS`, 33 ms). The cap is about bandwidth, not drawing: every repaint
+ships the entire surface, which is 0.56 MB at the default map size and 2.2 MB
+at a large map on a HiDPI screen, so an uncapped cone is a ~130 MB/s stream of
+pixels for motion that reads as smooth at 30 Hz.
+
+On the Lua side the room graph is rebuilt every frame but pushed to the panel
+on a 4 Hz dump; a change to the graph (a room opening, a key icon appearing)
+now kicks that push in the same frame, so opening a room no longer costs up to
+250 ms of staleness.
+
 ## Diagnostics
 
 Always on. The plugin writes state files into its config dir

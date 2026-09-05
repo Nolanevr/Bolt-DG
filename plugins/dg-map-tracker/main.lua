@@ -711,6 +711,7 @@ local function wipe_floor_state()
   S.rpm_last           = "0.0"   -- header RPM resets to 0.0 on a new floor
   S.key_match_seen     = nil     -- ground-key match tuning log (dev)
   S.key_match_log      = nil
+  S.rooms_fp           = nil     -- room-graph fingerprint (map push kick)
   S.guardian_seen      = nil     -- guardian-door detections (sticky per floor)
   S.guardian_pend      = nil     -- tolerant hits awaiting a second-frame confirm
   S.guardian_miss      = nil     -- guardian-n meshes that matched nothing (dev)
@@ -1606,6 +1607,32 @@ end
 
 -- Serialise rooms_by_cell to rooms.txt, sorted for stability. Only rewrites
 -- the file when the hash changes so tools tailing it don't re-fire.
+-- Cheap per-frame fingerprint of the room graph, so a room OPENING can push the
+-- map immediately instead of waiting out the 4Hz dump cadence (up to 250ms of
+-- staleness on the one event you are watching for). Hashes each cell's key, its
+-- image count and its first/last image name -- opening a room rewrites the body
+-- name and usually the image count, so it always lands.
+--
+-- Cells are combined COMMUTATIVELY (a sum) because pairs() order is not stable
+-- across frames, and each cell's hash is kept under 2^24 so the running total
+-- stays exact in a double. A collision is not a correctness problem: it only
+-- means this frame's change waits for the next 4Hz tick, which is exactly the
+-- old behaviour.
+local function rooms_fingerprint()
+  local total = 0
+  for k, c in pairs(rooms_by_cell) do
+    local h = #c.images * 131
+    for i = 1, #k do h = (h * 31 + k:byte(i)) % 16777216 end
+    local first, last = c.images[1], c.images[#c.images]
+    if first then for i = 1, #first do h = (h * 31 + first:byte(i)) % 16777216 end end
+    if last and last ~= first then
+      for i = 1, #last do h = (h * 31 + last:byte(i)) % 16777216 end
+    end
+    total = total + h
+  end
+  return total
+end
+
 local function dump_rooms()
   compute_parity()
   local cells = {}
@@ -4918,6 +4945,15 @@ bolt.onswapbuffers(function (event)
   -- we're always working with the freshest catalog.
   process_room_observations()
   room_observations = {}
+  -- Room graph changed this frame (a room opened, a key icon appeared)? Push it
+  -- to the map NOW. The 4Hz dump below is a floor for staleness, not a ceiling
+  -- for responsiveness, and opening a room is precisely the moment the map is
+  -- being looked at.
+  local rfp = rooms_fingerprint()
+  if S.rooms_fp ~= rfp then
+    S.rooms_fp = rfp
+    S.rooms_kick = true
+  end
   S.keybag_tick = S.keybag_tick + 1
   _settings_poll_counter = _settings_poll_counter + 1
   if _settings_poll_counter >= 30 then
@@ -4966,14 +5002,15 @@ bolt.onswapbuffers(function (event)
     SET.res.dump_queue()
     SET.icons.dump_queue()
     dump_rooms()
-  elseif SET.parity_kick then
-    -- Event-driven repaint: an examine bind just changed parity evidence --
-    -- recompute and push to the rooms panel THIS swap instead of waiting out
-    -- the dump cadence. Idempotent: sends are hash-deduped, file writes
-    -- hash-gated, and kicks only fire on actual binds.
+  elseif SET.parity_kick or S.rooms_kick then
+    -- Event-driven repaint: an examine bind just changed parity evidence, or a
+    -- room just opened -- recompute and push to the rooms panel THIS swap
+    -- instead of waiting out the dump cadence. Idempotent: sends are
+    -- hash-deduped, file writes hash-gated, and kicks only fire on real changes.
     dump_rooms()
   end
   SET.parity_kick = nil
+  S.rooms_kick = nil
   -- (Pink outline around queued icons removed — the panel picker is the
   -- primary classification workflow now.)
   frame_sigs_ttl_counter = frame_sigs_ttl_counter + 1

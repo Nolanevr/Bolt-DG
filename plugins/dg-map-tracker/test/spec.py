@@ -1198,6 +1198,46 @@ end
     check('the magenta override is applied AFTER door_color, so it wins',
           src.index('local color = door_color') < ovr < src.index('local tiles = style'))
 
+    # ---- map render hot path ------------------------------------------------
+    # The map surface is re-exported to Lua on every repaint, and the FOV cone
+    # forces one whenever the camera turns, so anything expensive in that path
+    # is paid tens of times a second. Two regressions are guarded here because
+    # both were measured, not guessed, and both are one edit away from
+    # returning.
+    print('\nmap render hot path')
+    mp = io.open(os.path.join(os.path.dirname(MAIN), 'map.html'),
+                 encoding='utf-8').read()
+    js = mp[mp.index('<script>'):mp.rindex('</script>')]
+    # 1. ctx.filter drop-shadow. SETTING the filter is free; DRAWING beneath it
+    #    cost ~20ms per icon, and the bill landed at the next getImageData --
+    #    which is why the whole export ran at ~13/s. ctx.shadow* is the same
+    #    effect ~290x cheaper. The one surviving `ctx.filter = "none"` is a
+    #    reset, not a draw.
+    filt = [ln.strip() for ln in js.split('\n')
+            if 'ctx.filter' in ln and 'none' not in ln and not ln.strip().startswith('//')]
+    check('no drawing under ctx.filter (drop-shadow is ~20ms per icon)',
+          not filt, '; '.join(filt[:2]))
+    check('icon shadow uses ctx.shadow*',
+          'ctx.shadowColor' in js and 'ctx.shadowBlur' in js)
+    # 2. The placeholder clears shadowColor on purpose; it must put it back or
+    #    every later icon in the same room silently loses its shadow.
+    ph = js[js.index('ctx.fillStyle="#888"') - 400: js.index('ctx.fillStyle="#888"') + 300]
+    check('missing-icon placeholder restores shadowColor after clearing it',
+          ph.count('ctx.shadowColor') >= 2, 'clears without restoring')
+    # 3. Angle-only repaints are coalesced AND rate-capped: each one ships the
+    #    whole surface (2.2MB at a large map on HiDPI), so an uncapped cone is a
+    #    ~130MB/s firehose for motion that reads as smooth at 30Hz.
+    check('cone repaints are rate-capped, not just rAF-coalesced',
+          'FAST_MIN_MS' in js and 'lastFastMs' in js)
+
+    # 4. Lua side: a room opening pushes the map that frame instead of waiting
+    #    out the 4Hz dump (up to 250ms on the one event you are watching for).
+    check('room-graph changes kick the map push immediately',
+          'rooms_fingerprint' in src and 'S.rooms_kick' in src)
+    check('the fingerprint combines cells commutatively (pairs order varies)',
+          'total = total + h' in src)
+    check('fingerprint state is wiped with the floor', 'S.rooms_fp           = nil' in src)
+
     print('\n%s  (%d failed)' % ('ALL GREEN' if not FAILS else 'FAILURES: ' + ', '.join(FAILS),
                                  len(FAILS)))
     return 1 if FAILS else 0
