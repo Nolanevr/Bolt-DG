@@ -49,7 +49,14 @@ ROOM_DOORS = {
   ["2WAY_ES"]     = {e=true,s=true},
   ["2WAY_SW"]     = {s=true,w=true},
   ["2WAY_NW"]     = {n=true,w=true},
+  -- All FOUR 3WAY shapes, mirroring main.lua's ROOM_DOORS. Only 3WAY_NEW was
+  -- here, so a fixture written with any of the other three got a room with NO
+  -- doors -- silently disconnected from base, and the assertions around it
+  -- passing for the wrong reason.
+  ["3WAY_NES"]    = {n=true,e=true,s=true},
   ["3WAY_NEW"]    = {n=true,e=true,w=true},
+  ["3WAY_NSW"]    = {n=true,s=true,w=true},
+  ["3WAY_ESW"]    = {e=true,s=true,w=true},
   ["ICON_BASE"]   = {}, ["ICON_BOSS"] = {},
   ["DE_NORTH"]    = {n=true}, ["DE_SOUTH"] = {s=true},
   ["DE_EAST"]     = {e=true}, ["DE_WEST"]  = {w=true},
@@ -57,6 +64,12 @@ ROOM_DOORS = {
   ["UNOPENED_SOUTH_TEMPLATE"] = {s=true},
   ["UNOPENED_EAST_TEMPLATE"]  = {e=true},
   ["UNOPENED_WEST_TEMPLATE"]  = {w=true},
+  -- The "?" variants are guardian-door rooms and carry doors exactly like the
+  -- TEMPLATE ones. Missing here, a guardian fixture would be door-less.
+  ["UNOPENED_NORTH_QUESTION"] = {n=true},
+  ["UNOPENED_SOUTH_QUESTION"] = {s=true},
+  ["UNOPENED_EAST_QUESTION"]  = {e=true},
+  ["UNOPENED_WEST_QUESTION"]  = {w=true},
 }
 function cell_doors(cell)
   local out = {}
@@ -1257,6 +1270,65 @@ end
     check('the fingerprint combines cells commutatively (pairs order varies)',
           'total = total + h' in src)
     check('fingerprint state is wiped with the floor', 'S.rooms_fp           = nil' in src)
+
+    # ---- parity: verdicts only about rooms in the tree -----------------------
+    # Every propagator that SEEDS parity gates on seen[] (facts, resource_bonus,
+    # skill_bonus, skill_crit). Bonus-UP did not, and it reads "no children" as
+    # the strongest form of "no crit continuation" -- but kids[] is only filled
+    # for rooms the BFS reached, so a room merely ABSENT from the tree also has
+    # no children and was read as an opened dead end.
+    #
+    # That is reachable in normal play: the tree needs a RECIPROCAL door and
+    # room images stream in over frames, so a freshly-opened room can carry its
+    # own doors a tick before its neighbour toward base carries the matching
+    # one. main.lua persists every verdict into S.parity_facts for the life of
+    # the floor, so a mark made in that gap outlived it -- and collided fatally
+    # once the room joined the tree and real evidence disagreed.
+    print('\nsolve_parity: no verdict on rooms outside the tree')
+    off = cells(lua, {
+        (1, 1): ['ICON_BASE', '2WAY_EW'],
+        (2, 1): ['2WAY_EW'],
+        (5, 5): ['2WAY_EW'],        # opened, but nothing reciprocates: off-tree
+    })
+    P, parent, diag, why, meta = g.solve_x(off, lua.table_from({}))
+    check('base still resolves', P['1,1'] == 'crit')
+    check('an off-tree opened room gets NO verdict', P['5,5'] is None,
+          'got %s -- %s' % (P['5,5'], why['5,5']))
+
+    # The same room, now reciprocated into the tree, must still be judged --
+    # the gate must not cost a real inference.
+    on = cells(lua, {
+        (1, 1): ['ICON_BASE', '2WAY_EW'],
+        (2, 1): ['3WAY_ESW'],
+        (2, 2): ['DE_NORTH'],
+    })
+    P2, _, _, why2, _ = g.solve_x(on, lua.table_from({}))
+    check('an in-tree opened dead end IS still judged bonus',
+          P2['2,2'] == 'bonus', 'got %s' % P2['2,2'])
+
+    # The off-tree mark used to cascade: a key "found" in the invented-bonus
+    # room dragged its lock bonus too.
+    off2 = cells(lua, {
+        (1, 1): ['ICON_BASE', '2WAY_EW'],
+        (2, 1): ['2WAY_EW'],
+        (5, 5): ['2WAY_EW'],
+        (6, 6): ['UNOPENED_WEST_TEMPLATE', 'blue_diamond'],
+    })
+    ev2 = lua.table_from({'keys': lua.table_from({
+        'blue_diamond': lua.table_from({'found': '5,5', 'lock': '6,6'})})})
+    P3, _, _, _, _ = g.solve_x(off2, ev2)
+    check('a key found off-tree does not drag its lock bonus',
+          P3['6,6'] is None, 'got %s' % P3['6,6'])
+
+    # Door-table parity between the stub and the shipped table: a fixture using
+    # a door name the stub lacks becomes a silently door-less room, and every
+    # assertion around it then passes for the wrong reason.
+    door_block = src[src.index('local ROOM_DOORS = {'):]
+    door_block = door_block[:door_block.index('\n}')]
+    shipped = set(re.findall(r'\["([A-Z0-9_]+)"\]', door_block))
+    stub = set(re.findall(r'\["([A-Z0-9_]+)"\]', PRELUDE))
+    check('stub ROOM_DOORS covers all %d shipped door shapes' % len(shipped),
+          shipped <= stub, 'missing: ' + ', '.join(sorted(shipped - stub)))
 
     print('\n%s  (%d failed)' % ('ALL GREEN' if not FAILS else 'FAILURES: ' + ', '.join(FAILS),
                                  len(FAILS)))
