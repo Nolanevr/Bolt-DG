@@ -49,7 +49,14 @@ ROOM_DOORS = {
   ["2WAY_ES"]     = {e=true,s=true},
   ["2WAY_SW"]     = {s=true,w=true},
   ["2WAY_NW"]     = {n=true,w=true},
+  -- All FOUR 3WAY shapes, mirroring main.lua's ROOM_DOORS. Only 3WAY_NEW was
+  -- here, so a fixture written with any of the other three got a room with NO
+  -- doors -- silently disconnected from base, and the assertions around it
+  -- passing for the wrong reason.
+  ["3WAY_NES"]    = {n=true,e=true,s=true},
   ["3WAY_NEW"]    = {n=true,e=true,w=true},
+  ["3WAY_NSW"]    = {n=true,s=true,w=true},
+  ["3WAY_ESW"]    = {e=true,s=true,w=true},
   ["ICON_BASE"]   = {}, ["ICON_BOSS"] = {},
   ["DE_NORTH"]    = {n=true}, ["DE_SOUTH"] = {s=true},
   ["DE_EAST"]     = {e=true}, ["DE_WEST"]  = {w=true},
@@ -57,6 +64,12 @@ ROOM_DOORS = {
   ["UNOPENED_SOUTH_TEMPLATE"] = {s=true},
   ["UNOPENED_EAST_TEMPLATE"]  = {e=true},
   ["UNOPENED_WEST_TEMPLATE"]  = {w=true},
+  -- The "?" variants are guardian-door rooms and carry doors exactly like the
+  -- TEMPLATE ones. Missing here, a guardian fixture would be door-less.
+  ["UNOPENED_NORTH_QUESTION"] = {n=true},
+  ["UNOPENED_SOUTH_QUESTION"] = {s=true},
+  ["UNOPENED_EAST_QUESTION"]  = {e=true},
+  ["UNOPENED_WEST_QUESTION"]  = {w=true},
 }
 function cell_doors(cell)
   local out = {}
@@ -1063,21 +1076,20 @@ end
                 ' key_lower = key_lower, NEI_DELTA = NEI_DELTA,'
                 ' NEI_OPP = NEI_OPP})')
 
-    def rank(spec, start, held=(), guardians=()):
-        model = lua.table_from({
+    def _model(spec, start, held, guardians, keys):
+        return lua.table_from({
             'rooms': cells(lua, spec), 'start': start,
             'held': lua.table_from({k: True for k in held}),
             'guardian_targets': lua.table_from({k: True for k in guardians}),
+            'keys': lua.table_from({
+                kn: lua.table_from(v) for kn, v in (keys or {}).items()}),
         })
-        return list(g.PATH.rank(model).values())
 
-    def best(spec, start, held=(), guardians=()):
-        model = lua.table_from({
-            'rooms': cells(lua, spec), 'start': start,
-            'held': lua.table_from({k: True for k in held}),
-            'guardian_targets': lua.table_from({k: True for k in guardians}),
-        })
-        return g.PATH.best(model)
+    def rank(spec, start, held=(), guardians=(), keys=None):
+        return list(g.PATH.rank(_model(spec, start, held, guardians, keys)).values())
+
+    def best(spec, start, held=(), guardians=(), keys=None):
+        return g.PATH.best(_model(spec, start, held, guardians, keys))
 
     # A corridor east from the base with two frontier doors: the near one is a
     # walled-in dead end (every neighbour already mapped), the far one can still
@@ -1095,10 +1107,10 @@ end
     check('every frontier door is found', len(r) == 2, '%d found' % len(r))
     if len(r) == 2:
         byto = {c['to']: c for c in r}
-        check('boxed-in room scores expansion 0 (a PROVEN dead end)',
-              byto['3,0']['expansion'] == 0, str(byto['3,0']['expansion']))
-        check('open-sided room scores expansion > 0',
-              byto['4,1']['expansion'] > 0, str(byto['4,1']['expansion']))
+        check('boxed-in room reaches only itself (a PROVEN dead end)',
+              abs(byto['3,0']['reach'] - 1) < 1e-9, str(byto['3,0']['reach']))
+        check('open-sided room reaches more than itself',
+              byto['4,1']['reach'] > 1, str(byto['4,1']['reach']))
         check('steps are walked rooms, not straight-line',
               byto['3,0']['steps'] == 2 and byto['4,1']['steps'] == 2,
               '%s / %s' % (byto['3,0']['steps'], byto['4,1']['steps']))
@@ -1123,7 +1135,7 @@ end
         (3, 1): ['UNOPENED_WEST_TEMPLATE', 'blue_diamond'],
     }
     r = rank(locked, '1,1')
-    check('a key-locked room is flagged blocked',
+    check('a key-locked room whose key was never seen is blocked',
           len(r) == 1 and r[0]['blocked'] == 'key',
           r and str(r[0]['blocked']))
     b, _ = best(locked, '1,1')
@@ -1134,6 +1146,85 @@ end
     if b is not None:
         check('spending a held key is scored as a bonus, not a penalty',
               b['score'] > rank(locked, '1,1')[0]['score'])
+
+    # ---- reach: how much territory is actually behind the door --------------
+    # The old score counted blank NEIGHBOURS (0..3), which cannot tell a door
+    # onto a 1-cell pocket from one onto a whole wing. Reach measures the
+    # connected undiscovered region instead. The floor is a tree, so a region
+    # lies behind exactly ONE frontier door even when several touch it -- each
+    # toucher is therefore credited size/touchers, the expected value.
+    print('\npathing: reach (expected rooms behind a door)')
+    # Two frontier doors the same distance out: one onto a sealed pocket, one
+    # onto the open half of the grid.
+    wing = {
+        (4, 7): ['ICON_BASE', '2WAY_EW'],
+        (5, 7): ['3WAY_NEW'],
+        (5, 6): ['UNOPENED_SOUTH_TEMPLATE'],       # into the open grid
+        (6, 7): ['UNOPENED_WEST_TEMPLATE'],        # bottom edge, boxed in
+        # Seal 6,7: its only non-room neighbour would be 6,6, so that has to be
+        # a room too or it touches the open grid like everything else.
+        (6, 6): ['2WAY_EW'], (7, 6): ['2WAY_ES'], (7, 7): ['2WAY_NW'],
+    }
+    r = rank(wing, '4,7')
+    byto = {c['to']: c for c in r}
+    check('a door onto the open grid outreaches a sealed pocket',
+          byto['5,6']['reach'] > byto['6,7']['reach'],
+          '%.1f vs %.1f' % (byto['5,6']['reach'], byto['6,7']['reach']))
+    check('and it is the recommendation', r[0]['to'] == '5,6', 'picked ' + r[0]['to'])
+
+    # A region touched by two frontier doors is split between them, not counted
+    # twice: crediting both in full would rank a shared big region above a
+    # privately-owned smaller one, which is backwards.
+    shared = {
+        (0, 0): ['ICON_BASE', '2WAY_ES'],
+        (0, 1): ['2WAY_NE'],
+        (1, 1): ['UNOPENED_WEST_TEMPLATE'],
+        (1, 0): ['UNOPENED_SOUTH_TEMPLATE'],
+    }
+    rs = rank(shared, '0,0')
+    tot = sum(c['reach'] - 1 for c in rs)
+    blank = 64 - 4
+    check('a shared region is split, not double-counted',
+          abs(tot - blank) < 1e-6, 'credited %.1f of %d blank cells' % (tot, blank))
+
+    # ---- keys: three states, not two ----------------------------------------
+    # A key SEEN on the ground in explored space is fetchable at will, so its
+    # door costs a DETOUR, not a refusal -- parity.lua's openable() has always
+    # treated found keys this way and this module used to disagree with it.
+    print('\npathing: a found key is a detour, not a wall')
+    fetch = {
+        (1, 1): ['ICON_BASE', '2WAY_EW'],
+        (2, 1): ['3WAY_NEW'],
+        (2, 0): ['DE_SOUTH'],                       # the key is lying here
+        (3, 1): ['UNOPENED_WEST_TEMPLATE', 'blue_diamond'],
+    }
+    seen_key = {'blue_diamond': {'found': '2,0', 'lock': '3,1'}}
+    r = rank(fetch, '1,1')
+    check('key never seen -> blocked', r[0]['blocked'] == 'key')
+    r = rank(fetch, '1,1', keys=seen_key)
+    check('key seen on the ground -> openable, state "found"',
+          r[0]['blocked'] is None and r[0]['key_state'] == 'found',
+          '%s / %s' % (r[0]['blocked'], r[0]['key_state']))
+    check('the fetch is priced as a real detour, not free',
+          r[0]['detour'] > 0, 'detour %s' % r[0]['detour'])
+    b, _ = best(fetch, '1,1', keys=seen_key)
+    check('best() will now route through a fetchable key', b is not None)
+
+    # Picking that same key up must improve the door and drop the detour --
+    # this is what makes the marker move when you grab a key.
+    r_held = rank(fetch, '1,1', held=['blue_diamond'], keys=seen_key)
+    check('carrying the key removes the detour',
+          r_held[0]['detour'] == 0, 'detour %s' % r_held[0]['detour'])
+    check('carrying the key scores strictly better than fetching it',
+          r_held[0]['score'] > r[0]['score'],
+          '%.0f vs %.0f' % (r_held[0]['score'], r[0]['score']))
+    check('carrying the key reports state "held"', r_held[0]['key_state'] == 'held')
+
+    # A key whose pickup room is not walkable is still blocked: "found" has to
+    # mean fetchable, not merely recorded somewhere.
+    r_far = rank(fetch, '1,1', keys={'blue_diamond': {'found': '7,7', 'lock': '3,1'}})
+    check('a key recorded in unreachable space stays blocked',
+          r_far[0]['blocked'] == 'key', str(r_far[0]['blocked']))
 
     # Guardians and skill doors are penalties, not blocks: you CAN open them,
     # they just cost more than a plain door, so an equal plain door wins.
@@ -1175,6 +1266,19 @@ end
           'next = is_next' in src and 'buckets.next_cyan' in src)
     check('hint pulses (motion, not a sixth colour)',
           'hint_pulse' in src and 'next_cyan" and hint_pulse' in src)
+    # The marker has to MOVE when you pick a key up -- that is the whole value of
+    # carrying one. main.lua re-ranks on a keybag change rather than waiting out
+    # the 4Hz poll, and feeds the scorer where each key was found and what it
+    # opens so a fetchable key can be priced as a detour.
+    check('a keybag change re-ranks that frame, not on the next poll',
+          'bag_changed' in src and 'S.next_hint_bag' in src)
+    check('key pickup/lock cells are passed to the scorer',
+          'keys = kinfo' in src and 'st.found' in src and 'st.lock' in src)
+    check('poisoned lock bindings are not passed as real cells',
+          'st.lock ~= false' in src)
+    check('keybag signature is wiped with the floor',
+          'S.next_hint_bag      = nil' in src)
+
     check('hint can be switched off',
           'NEXT_DOOR_HINT' in src and 'next_door_hint' in
           io.open(os.path.join(os.path.dirname(MAIN), 'settings_panel.lua'),
@@ -1257,6 +1361,65 @@ end
     check('the fingerprint combines cells commutatively (pairs order varies)',
           'total = total + h' in src)
     check('fingerprint state is wiped with the floor', 'S.rooms_fp           = nil' in src)
+
+    # ---- parity: verdicts only about rooms in the tree -----------------------
+    # Every propagator that SEEDS parity gates on seen[] (facts, resource_bonus,
+    # skill_bonus, skill_crit). Bonus-UP did not, and it reads "no children" as
+    # the strongest form of "no crit continuation" -- but kids[] is only filled
+    # for rooms the BFS reached, so a room merely ABSENT from the tree also has
+    # no children and was read as an opened dead end.
+    #
+    # That is reachable in normal play: the tree needs a RECIPROCAL door and
+    # room images stream in over frames, so a freshly-opened room can carry its
+    # own doors a tick before its neighbour toward base carries the matching
+    # one. main.lua persists every verdict into S.parity_facts for the life of
+    # the floor, so a mark made in that gap outlived it -- and collided fatally
+    # once the room joined the tree and real evidence disagreed.
+    print('\nsolve_parity: no verdict on rooms outside the tree')
+    off = cells(lua, {
+        (1, 1): ['ICON_BASE', '2WAY_EW'],
+        (2, 1): ['2WAY_EW'],
+        (5, 5): ['2WAY_EW'],        # opened, but nothing reciprocates: off-tree
+    })
+    P, parent, diag, why, meta = g.solve_x(off, lua.table_from({}))
+    check('base still resolves', P['1,1'] == 'crit')
+    check('an off-tree opened room gets NO verdict', P['5,5'] is None,
+          'got %s -- %s' % (P['5,5'], why['5,5']))
+
+    # The same room, now reciprocated into the tree, must still be judged --
+    # the gate must not cost a real inference.
+    on = cells(lua, {
+        (1, 1): ['ICON_BASE', '2WAY_EW'],
+        (2, 1): ['3WAY_ESW'],
+        (2, 2): ['DE_NORTH'],
+    })
+    P2, _, _, why2, _ = g.solve_x(on, lua.table_from({}))
+    check('an in-tree opened dead end IS still judged bonus',
+          P2['2,2'] == 'bonus', 'got %s' % P2['2,2'])
+
+    # The off-tree mark used to cascade: a key "found" in the invented-bonus
+    # room dragged its lock bonus too.
+    off2 = cells(lua, {
+        (1, 1): ['ICON_BASE', '2WAY_EW'],
+        (2, 1): ['2WAY_EW'],
+        (5, 5): ['2WAY_EW'],
+        (6, 6): ['UNOPENED_WEST_TEMPLATE', 'blue_diamond'],
+    })
+    ev2 = lua.table_from({'keys': lua.table_from({
+        'blue_diamond': lua.table_from({'found': '5,5', 'lock': '6,6'})})})
+    P3, _, _, _, _ = g.solve_x(off2, ev2)
+    check('a key found off-tree does not drag its lock bonus',
+          P3['6,6'] is None, 'got %s' % P3['6,6'])
+
+    # Door-table parity between the stub and the shipped table: a fixture using
+    # a door name the stub lacks becomes a silently door-less room, and every
+    # assertion around it then passes for the wrong reason.
+    door_block = src[src.index('local ROOM_DOORS = {'):]
+    door_block = door_block[:door_block.index('\n}')]
+    shipped = set(re.findall(r'\["([A-Z0-9_]+)"\]', door_block))
+    stub = set(re.findall(r'\["([A-Z0-9_]+)"\]', PRELUDE))
+    check('stub ROOM_DOORS covers all %d shipped door shapes' % len(shipped),
+          shipped <= stub, 'missing: ' + ', '.join(sorted(shipped - stub)))
 
     print('\n%s  (%d failed)' % ('ALL GREEN' if not FAILS else 'FAILURES: ' + ', '.join(FAILS),
                                  len(FAILS)))

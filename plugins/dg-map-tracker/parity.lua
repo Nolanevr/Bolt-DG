@@ -355,7 +355,24 @@ local function solve_parity(rooms, ev)
     -- is not proven bonus, in which case it may be a side-branch terminus
     -- holding a crit key, which would make it crit. Halt there.
     for ck in pairs(rooms) do
-      if not P[ck] and no_crit_continuation(ck) then
+      -- seen[] gate: this rule reads "no children" as the STRONGEST form of
+      -- "no crit continuation", but kids[] is only populated for rooms the BFS
+      -- reached -- so a room that is merely absent from the tree also has no
+      -- children, and read as an opened dead end. That is not the same claim:
+      -- a room off the tree is one we know nothing about, and the honest
+      -- verdict is no verdict.
+      --
+      -- It is reachable in normal play, not just in theory. The tree needs a
+      -- RECIPROCAL door, and room images stream in over several frames, so a
+      -- freshly-opened room can carry its own doors a tick before the
+      -- neighbour toward base carries the matching one. In that gap this rule
+      -- marked it bonus -- and main.lua persists every verdict into
+      -- S.parity_facts for the life of the floor, so the mark outlived the gap
+      -- that produced it. When the room then joined the tree and real evidence
+      -- said crit, the seeded fact and the fresh inference collided and killed
+      -- the floor. Every other seeding path here already gates on seen[]
+      -- (facts, resource_bonus, skill_bonus, skill_crit); this one did not.
+      if seen[ck] and not P[ck] and no_crit_continuation(ck) then
         local kn = key_in[ck]
         if (not kn and no_key_trusted(ck)) or (kn and key_parity(kn) == "bonus") then
           set(ck, "bonus", ("bonus UP: no crit continuation -- %s%s"):format(
