@@ -1076,21 +1076,20 @@ end
                 ' key_lower = key_lower, NEI_DELTA = NEI_DELTA,'
                 ' NEI_OPP = NEI_OPP})')
 
-    def rank(spec, start, held=(), guardians=()):
-        model = lua.table_from({
+    def _model(spec, start, held, guardians, keys):
+        return lua.table_from({
             'rooms': cells(lua, spec), 'start': start,
             'held': lua.table_from({k: True for k in held}),
             'guardian_targets': lua.table_from({k: True for k in guardians}),
+            'keys': lua.table_from({
+                kn: lua.table_from(v) for kn, v in (keys or {}).items()}),
         })
-        return list(g.PATH.rank(model).values())
 
-    def best(spec, start, held=(), guardians=()):
-        model = lua.table_from({
-            'rooms': cells(lua, spec), 'start': start,
-            'held': lua.table_from({k: True for k in held}),
-            'guardian_targets': lua.table_from({k: True for k in guardians}),
-        })
-        return g.PATH.best(model)
+    def rank(spec, start, held=(), guardians=(), keys=None):
+        return list(g.PATH.rank(_model(spec, start, held, guardians, keys)).values())
+
+    def best(spec, start, held=(), guardians=(), keys=None):
+        return g.PATH.best(_model(spec, start, held, guardians, keys))
 
     # A corridor east from the base with two frontier doors: the near one is a
     # walled-in dead end (every neighbour already mapped), the far one can still
@@ -1108,10 +1107,10 @@ end
     check('every frontier door is found', len(r) == 2, '%d found' % len(r))
     if len(r) == 2:
         byto = {c['to']: c for c in r}
-        check('boxed-in room scores expansion 0 (a PROVEN dead end)',
-              byto['3,0']['expansion'] == 0, str(byto['3,0']['expansion']))
-        check('open-sided room scores expansion > 0',
-              byto['4,1']['expansion'] > 0, str(byto['4,1']['expansion']))
+        check('boxed-in room reaches only itself (a PROVEN dead end)',
+              abs(byto['3,0']['reach'] - 1) < 1e-9, str(byto['3,0']['reach']))
+        check('open-sided room reaches more than itself',
+              byto['4,1']['reach'] > 1, str(byto['4,1']['reach']))
         check('steps are walked rooms, not straight-line',
               byto['3,0']['steps'] == 2 and byto['4,1']['steps'] == 2,
               '%s / %s' % (byto['3,0']['steps'], byto['4,1']['steps']))
@@ -1136,7 +1135,7 @@ end
         (3, 1): ['UNOPENED_WEST_TEMPLATE', 'blue_diamond'],
     }
     r = rank(locked, '1,1')
-    check('a key-locked room is flagged blocked',
+    check('a key-locked room whose key was never seen is blocked',
           len(r) == 1 and r[0]['blocked'] == 'key',
           r and str(r[0]['blocked']))
     b, _ = best(locked, '1,1')
@@ -1147,6 +1146,85 @@ end
     if b is not None:
         check('spending a held key is scored as a bonus, not a penalty',
               b['score'] > rank(locked, '1,1')[0]['score'])
+
+    # ---- reach: how much territory is actually behind the door --------------
+    # The old score counted blank NEIGHBOURS (0..3), which cannot tell a door
+    # onto a 1-cell pocket from one onto a whole wing. Reach measures the
+    # connected undiscovered region instead. The floor is a tree, so a region
+    # lies behind exactly ONE frontier door even when several touch it -- each
+    # toucher is therefore credited size/touchers, the expected value.
+    print('\npathing: reach (expected rooms behind a door)')
+    # Two frontier doors the same distance out: one onto a sealed pocket, one
+    # onto the open half of the grid.
+    wing = {
+        (4, 7): ['ICON_BASE', '2WAY_EW'],
+        (5, 7): ['3WAY_NEW'],
+        (5, 6): ['UNOPENED_SOUTH_TEMPLATE'],       # into the open grid
+        (6, 7): ['UNOPENED_WEST_TEMPLATE'],        # bottom edge, boxed in
+        # Seal 6,7: its only non-room neighbour would be 6,6, so that has to be
+        # a room too or it touches the open grid like everything else.
+        (6, 6): ['2WAY_EW'], (7, 6): ['2WAY_ES'], (7, 7): ['2WAY_NW'],
+    }
+    r = rank(wing, '4,7')
+    byto = {c['to']: c for c in r}
+    check('a door onto the open grid outreaches a sealed pocket',
+          byto['5,6']['reach'] > byto['6,7']['reach'],
+          '%.1f vs %.1f' % (byto['5,6']['reach'], byto['6,7']['reach']))
+    check('and it is the recommendation', r[0]['to'] == '5,6', 'picked ' + r[0]['to'])
+
+    # A region touched by two frontier doors is split between them, not counted
+    # twice: crediting both in full would rank a shared big region above a
+    # privately-owned smaller one, which is backwards.
+    shared = {
+        (0, 0): ['ICON_BASE', '2WAY_ES'],
+        (0, 1): ['2WAY_NE'],
+        (1, 1): ['UNOPENED_WEST_TEMPLATE'],
+        (1, 0): ['UNOPENED_SOUTH_TEMPLATE'],
+    }
+    rs = rank(shared, '0,0')
+    tot = sum(c['reach'] - 1 for c in rs)
+    blank = 64 - 4
+    check('a shared region is split, not double-counted',
+          abs(tot - blank) < 1e-6, 'credited %.1f of %d blank cells' % (tot, blank))
+
+    # ---- keys: three states, not two ----------------------------------------
+    # A key SEEN on the ground in explored space is fetchable at will, so its
+    # door costs a DETOUR, not a refusal -- parity.lua's openable() has always
+    # treated found keys this way and this module used to disagree with it.
+    print('\npathing: a found key is a detour, not a wall')
+    fetch = {
+        (1, 1): ['ICON_BASE', '2WAY_EW'],
+        (2, 1): ['3WAY_NEW'],
+        (2, 0): ['DE_SOUTH'],                       # the key is lying here
+        (3, 1): ['UNOPENED_WEST_TEMPLATE', 'blue_diamond'],
+    }
+    seen_key = {'blue_diamond': {'found': '2,0', 'lock': '3,1'}}
+    r = rank(fetch, '1,1')
+    check('key never seen -> blocked', r[0]['blocked'] == 'key')
+    r = rank(fetch, '1,1', keys=seen_key)
+    check('key seen on the ground -> openable, state "found"',
+          r[0]['blocked'] is None and r[0]['key_state'] == 'found',
+          '%s / %s' % (r[0]['blocked'], r[0]['key_state']))
+    check('the fetch is priced as a real detour, not free',
+          r[0]['detour'] > 0, 'detour %s' % r[0]['detour'])
+    b, _ = best(fetch, '1,1', keys=seen_key)
+    check('best() will now route through a fetchable key', b is not None)
+
+    # Picking that same key up must improve the door and drop the detour --
+    # this is what makes the marker move when you grab a key.
+    r_held = rank(fetch, '1,1', held=['blue_diamond'], keys=seen_key)
+    check('carrying the key removes the detour',
+          r_held[0]['detour'] == 0, 'detour %s' % r_held[0]['detour'])
+    check('carrying the key scores strictly better than fetching it',
+          r_held[0]['score'] > r[0]['score'],
+          '%.0f vs %.0f' % (r_held[0]['score'], r[0]['score']))
+    check('carrying the key reports state "held"', r_held[0]['key_state'] == 'held')
+
+    # A key whose pickup room is not walkable is still blocked: "found" has to
+    # mean fetchable, not merely recorded somewhere.
+    r_far = rank(fetch, '1,1', keys={'blue_diamond': {'found': '7,7', 'lock': '3,1'}})
+    check('a key recorded in unreachable space stays blocked',
+          r_far[0]['blocked'] == 'key', str(r_far[0]['blocked']))
 
     # Guardians and skill doors are penalties, not blocks: you CAN open them,
     # they just cost more than a plain door, so an equal plain door wins.
@@ -1188,6 +1266,19 @@ end
           'next = is_next' in src and 'buckets.next_cyan' in src)
     check('hint pulses (motion, not a sixth colour)',
           'hint_pulse' in src and 'next_cyan" and hint_pulse' in src)
+    # The marker has to MOVE when you pick a key up -- that is the whole value of
+    # carrying one. main.lua re-ranks on a keybag change rather than waiting out
+    # the 4Hz poll, and feeds the scorer where each key was found and what it
+    # opens so a fetchable key can be priced as a detour.
+    check('a keybag change re-ranks that frame, not on the next poll',
+          'bag_changed' in src and 'S.next_hint_bag' in src)
+    check('key pickup/lock cells are passed to the scorer',
+          'keys = kinfo' in src and 'st.found' in src and 'st.lock' in src)
+    check('poisoned lock bindings are not passed as real cells',
+          'st.lock ~= false' in src)
+    check('keybag signature is wiped with the floor',
+          'S.next_hint_bag      = nil' in src)
+
     check('hint can be switched off',
           'NEXT_DOOR_HINT' in src and 'next_door_hint' in
           io.open(os.path.join(os.path.dirname(MAIN), 'settings_panel.lua'),

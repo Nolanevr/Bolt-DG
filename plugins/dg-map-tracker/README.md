@@ -106,23 +106,49 @@ it scores:
 
 | Term | Points | Why |
 |------|--------|-----|
-| rooms walked to reach the door | -18 each | backtracking is the whole cost of a full clear |
-| blank neighbours the room could open into (0-3) | +22 each | how much new map it can reveal |
+| rooms walked, **including any key detour** | -18 each | backtracking is the whole cost of a full clear |
+| `sqrt(expected rooms behind the door)` | +7 each | how much map it can reveal |
 | lock whose key is in your bag | +30 | spend the key while you are standing there |
 | guardian door | -45 | costs a fight |
 | skill door | -20 | may want a level, resources, or a detour |
 | `?` room | -6 | contents unknown |
 
-Distance dominates on purpose: the cheapest next room is usually the right one,
-and a reveal can only pull you about two rooms out of your way. A door you
-*cannot* open (a key you have not found) is never the recommendation -- it is
-ranked and flagged, but the marker only ever points somewhere you can actually
-go. If every frontier door is gated, no marker is shown.
+**Reach** is how much territory is actually behind a door. The blank in-bounds
+cells are flooded into connected regions and each region is handed to the
+unopened rooms touching it -- and because the floor graph is a *tree*, a region
+lies behind exactly ONE of them even when several sit beside it, so each toucher
+is credited `size / touchers`: the expected value, not the full size. Crediting
+every toucher in full would rank a door onto a big *shared* region above one
+that privately owns a smaller one, which is backwards.
 
-"Expansion" is the honest part of the estimate: an unopened room's doors are
-invisible, but a room can only lead somewhere new through a grid neighbour that
-is still blank, so a count of blank neighbours is a hard upper bound -- and 0
-means a *proven* dead end, not a guess.
+It enters as a square root at a small weight because on a full clear it is a
+**tie-breaker, not a driver**: you open everything eventually, so a big region
+buys information and an earlier frontier rather than extra rooms, and that
+saturates fast. Nearest-first is close to optimal for a completionist sweep, so
+reach separates doors of similar cost without marching you past a cheap one -- a
+sealed dead end two rooms away still beats half the floor six rooms away,
+because you must come back for it either way.
+
+**Keys have three states, not two:**
+
+| State | Meaning |
+|---|---|
+| `held` | in your bag -- open it where you stand, and it scores `+30` |
+| `found` | seen on the ground in explored space, so fetchable at will: the door costs a **detour** (walk to the key, then to the door, less the direct walk), folded into the distance term so it competes on cost |
+| *unseen* | genuinely blocked; ranked and flagged, but never the recommendation |
+
+That middle state is the one that changed. The scorer used to call any door
+whose key you weren't carrying "blocked", which hid every door whose key was
+lying two rooms back -- and disagreed with the parity engine, whose `openable()`
+has always treated a found key as fetchable.
+
+**Picking a key up re-ranks immediately.** The hint normally recomputes at 4 Hz,
+but a change to the keybag kicks it that frame, so the marker moves the moment
+you grab a key rather than up to 250 ms later.
+
+Crit/bonus deliberately does **not** feed the score. On a full clear the room set
+is fixed, so parity cannot change what you must open, and its one predictive use
+-- crit rooms tend to lead onward -- is measured directly and better as reach.
 
 With dev tools on, `pathing_diag.txt` lists the top frontier doors with their
 score breakdown, so the marker can be audited rather than trusted.

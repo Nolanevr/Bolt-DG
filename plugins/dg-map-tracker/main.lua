@@ -714,6 +714,7 @@ local function wipe_floor_state()
   S.key_match_seen     = nil     -- ground-key match tuning log (dev)
   S.key_match_log      = nil
   S.rooms_fp           = nil     -- room-graph fingerprint (map push kick)
+  S.next_hint_bag      = nil     -- keybag signature behind the last hint rank
   S.guardian_seen      = nil     -- guardian-door detections (sticky per floor)
   S.guardian_pend      = nil     -- tolerant hits awaiting a second-frame confirm
   S.guardian_miss      = nil     -- guardian-n meshes that matched nothing (dev)
@@ -4381,14 +4382,26 @@ bolt.onrendergameview(function (event)
       local next_hint = nil
       if NEXT_DOOR_HINT and pgx and next(rooms_by_cell) then
         local now = bolt.time()
-        if not S.next_hint_us or (now - S.next_hint_us) > 250000 then
-          S.next_hint_us = now
-          -- Keys in the bag right now, on the same 60-tick freshness rule the
-          -- door colouring uses.
-          local held = {}
-          for name, tick in pairs(S.keybag_state) do
-            if S.keybag_tick - tick <= 60 then held[name] = true end
+        -- Keys in the bag right now, on the same 60-tick freshness rule the
+        -- door colouring uses.
+        local held = {}
+        local held_sig = {}
+        for name, tick in pairs(S.keybag_state) do
+          if S.keybag_tick - tick <= 60 then
+            held[name] = true
+            held_sig[#held_sig + 1] = name
           end
+        end
+        table.sort(held_sig)
+        held_sig = table.concat(held_sig, ",")
+        -- Picking a key up can change which door is best -- that is the whole
+        -- point of carrying it -- so a bag change re-ranks THIS frame instead
+        -- of waiting out the 4Hz poll. Same reasoning as the room-graph kick:
+        -- the poll is a floor on staleness, not a ceiling on responsiveness.
+        local bag_changed = (S.next_hint_bag ~= held_sig)
+        if bag_changed or not S.next_hint_us or (now - S.next_hint_us) > 250000 then
+          S.next_hint_us = now
+          S.next_hint_bag = held_sig
           -- Unopened cells sitting behind a detected guardian door, keyed the
           -- way pathing.lua wants them. guardian_door() is per (room, dir), so
           -- walk the rooms we know and record the cell each guardian leads to.
@@ -4405,9 +4418,18 @@ bolt.onrendergameview(function (event)
               end
             end
           end
+          -- Where each key was picked up and which door it opens. A key SEEN
+          -- on the ground is fetchable at will, so its door costs a detour
+          -- rather than being unopenable -- the scorer needs both cells to
+          -- price that route. lock == false means the binding was poisoned.
+          local kinfo = {}
+          for kn, st in pairs(keys_state) do
+            kinfo[kn] = { found = st.found or nil,
+                          lock = (st.lock ~= false) and st.lock or nil }
+          end
           local best, ranked = SET.pathing.best({
             rooms = rooms_by_cell, start = pgx .. "," .. pgz,
-            held = held, guardian_targets = gtargets,
+            held = held, keys = kinfo, guardian_targets = gtargets,
           })
           S.next_hint = best
           -- The ranking IS the explanation, so write it out rather than only
@@ -4418,10 +4440,10 @@ bolt.onrendergameview(function (event)
             for i, c in ipairs(ranked) do
               if i > 12 then break end
               w[#w + 1] = string.format(
-                "%2d. %s -%s-> %s  score=%4d  steps=%d exp=%d%s%s%s%s\n",
-                i, c.from, c.dir, c.to, c.score, c.steps, c.expansion,
+                "%2d. %s -%s-> %s  score=%4d  steps=%d+%d reach=%.1f%s%s%s%s\n",
+                i, c.from, c.dir, c.to, c.score, c.steps, c.detour or 0, c.reach or 0,
                 c.blocked and ("  BLOCKED:" .. c.blocked) or "",
-                c.keyname and ("  key=" .. c.keyname) or "",
+                c.keyname and ("  key=" .. c.keyname .. "/" .. tostring(c.key_state)) or "",
                 c.guardian and "  guardian" or "", c.skill and "  skilldoor" or "")
             end
             SET.dev_save("pathing_diag.txt", table.concat(w))
