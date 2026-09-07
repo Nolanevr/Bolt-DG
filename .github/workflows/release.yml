@@ -1,0 +1,95 @@
+# Publish a Bolt one-click-install release.
+#
+# Push a tag `v<version>` matching plugins/dg-map-tracker/bolt.json, e.g.
+#
+#   git tag v1.0-pre6 && git push origin v1.0-pre6
+#
+# and this builds the plugin tarball, publishes it as the release asset at
+# exactly the URL meta.json names, and -- only if the bytes disagree with what
+# meta.json claims -- corrects meta.json on the default branch.
+#
+# WHY THE LAST STEP EXISTS. Bolt installs from meta.json on the default branch:
+# it reads the url, downloads that tarball, and checks it against the sha256.
+# So the published asset and meta.json cannot be allowed to disagree -- a stale
+# sha fails the install outright, and a stale URL is worse, because it succeeds
+# and quietly installs somebody else's older build. tools/make_release.py is
+# reproducible, so meta.json committed alongside the code is normally already
+# right and this step is a no-op; it is here so a byte difference between a
+# maintainer's machine and the runner self-heals instead of shipping broken.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # make_release.py reads git ls-files
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # The tag names the asset URL, and bolt.json's version is what the
+      # installed plugin reports back to Bolt. If those two disagree the
+      # release either 404s or never offers itself as an update, so stop here
+      # rather than publish something that cannot work.
+      - name: Tag must match bolt.json version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          have=$(python -c "import json;print(json.load(open('plugins/dg-map-tracker/bolt.json'))['version'])")
+          echo "tag=$tag bolt.json=$have"
+          [ "$tag" = "$have" ] || { echo "::error::tag v$tag does not match bolt.json version $have"; exit 1; }
+
+      - name: Test
+        run: |
+          pip install --quiet lupa
+          python plugins/dg-map-tracker/test/spec.py
+
+      - name: Build
+        run: |
+          python tools/make_release.py
+          echo "SHA=$(python -c "import json;print(json.load(open('meta.json'))['sha256'])")" >> "$GITHUB_ENV"
+          echo "ASSET=$(ls dist/*.tar.gz)" >> "$GITHUB_ENV"
+
+      # Asset first, meta.json second: if this job dies between the two, the
+      # default branch still points at the PREVIOUS working release, so a user
+      # installing mid-failure gets an old plugin rather than a dead link.
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "$ASSET" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Install / update in Bolt from:
+          \`https://raw.githubusercontent.com/$GITHUB_REPOSITORY/${{ github.event.repository.default_branch }}/meta.json\`
+
+          sha256 \`$SHA\`" \
+          || gh release upload "$GITHUB_REF_NAME" "$ASSET" --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Correct meta.json on the default branch if it disagrees
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git fetch origin "$DEFAULT_BRANCH"
+          git checkout "$DEFAULT_BRANCH"
+          git pull --ff-only origin "$DEFAULT_BRANCH"
+          python tools/make_release.py >/dev/null
+          if git diff --quiet -- meta.json; then
+            echo "meta.json already matches the published asset (sha $SHA)"
+            exit 0
+          fi
+          echo "::warning::meta.json did not match the built asset -- correcting it on $DEFAULT_BRANCH"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "release ${GITHUB_REF_NAME}: point meta.json at the published asset [skip ci]" -- meta.json
+          git push origin "HEAD:$DEFAULT_BRANCH"
