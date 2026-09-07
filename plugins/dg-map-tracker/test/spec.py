@@ -1390,6 +1390,14 @@ end
           'flashPhase ^= 1; fastRepaint()' in js)
     check('the flash timer is armed and disarmed by the render itself',
           'setFlashing(flashing > 0)' in js and 'clearInterval(flashTimer)' in js)
+    #  3b. Nothing drawn on the way to the export may be able to stop it. The
+    #     flash sits between the corridor pass and getImageData, and `rendering`
+    #     gates every later render -- so one throw used to freeze the map for
+    #     the session, silently, with the header bar still ticking beside it.
+    check('the flash pass cannot take the export down with it',
+          'render_err:keyflash' in js)
+    check('a throw in the layer pass still clears `rendering`',
+          'finally { rendering = false;' in js)
     check('the flash has a settings row', 'key_room_flash' in settings)
     check('the flash toggle is polled and pushed to the map',
           'KEY_ROOM_FLASH' in src and 's.key_room_flash' in src

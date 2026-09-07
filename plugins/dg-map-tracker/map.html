@@ -564,7 +564,14 @@
       // chrome costs an SVG round trip per frame; this pass rides the same
       // cached-chrome path as the FOV cone. Drawn AFTER the corridor stubs and
       // BEFORE the icons, exactly where the CSS border sits in the stack.
+      // In a try, like the icon pass: this sits BETWEEN the corridor draw and
+      // the getImageData export, and an exception here would take the export
+      // with it -- no frame posted, `rendering` never cleared, the map frozen
+      // on its last good frame with no error anywhere on screen. A cosmetic
+      // ring must never be able to kill the map; a dropped ring is the worst
+      // it can cost.
       let flashing = 0;
+      try {
       if (keyFlashOn && lastRooms) {
         const sc = RE / EDGE, bw = CELL_BORDER_PX * sc;
         const p = gE.pad * sc, s = gE.step * sc, c = gE.cell * sc;
@@ -599,6 +606,7 @@
         ctx.stroke();
       }
       setFlashing(flashing > 0);
+      } catch (e) { post("render_err:keyflash " + (e.message||e)); }
 
       try { if (lastRooms) compositeIcons(lastRooms, RE); } catch (e) { post("render_err:composite " + (e.message||e)); }
       try {
@@ -685,9 +693,15 @@
       const img = new Image();
       img.onload = () => {
         cachedSvgImg = img;
-        drawMapLayers(img);
-        rendering = false;
-        if (dirty) doRender();
+        // `rendering` is cleared in a finally, not after the draw. It gates
+        // EVERY later render (repaint only sets dirty while it is true, and
+        // fastRepaint does nothing at all), so a single throw anywhere in the
+        // layer pass used to end the map for the rest of the session -- frozen
+        // on its last frame, still exporting nothing, with the header bar
+        // updating beside it as if all were well.
+        try { drawMapLayers(img); }
+        catch (e) { post("render_err:layers " + (e.message||e)); }
+        finally { rendering = false; if (dirty) doRender(); }
       };
       img.onerror = () => { post("render_err:svg-load-failed"); rendering = false; if (dirty) doRender(); };
       img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
