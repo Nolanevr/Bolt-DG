@@ -87,6 +87,11 @@
     // matter which way the camera was actually pointing. A direction we do not
     // have is now no cone at all.
     let cameraAngle = null;
+    // Loose-key flash: a key lying in an OPENED room, not yet picked up, makes
+    // that room's border alternate green/red (see the flash pass in
+    // drawMapLayers). Toggleable from the settings panel, like every other
+    // moving thing the map draws.
+    let keyFlashOn = true;
     const COLORS = { gold:"#d4a03e", silver:"#c8c8c8", blue:"#4b7dc4", green:"#4b9c58",
       purple:"#8654a9", crimson:"#b04a4a", orange:"#d67c3c", yellow:"#e0c73e" };
     const SHAPE_NAMES = new Set(["triangle","rectangle","wedge","corner","pentagon","diamond","shield","crescent"]);
@@ -107,7 +112,10 @@
       *{box-sizing:border-box;}
       .grid{position:relative;background:rgba(0,0,0,0.65);display:grid;
         grid-template-columns:repeat(8,1fr);grid-template-rows:repeat(8,1fr);gap:{GAP}%;padding:{GAP}%;}
-      .cell{background:var(--cell-empty);border:3px solid transparent;border-radius:3px;
+      /* {BW} is CELL_BORDER_PX. The loose-key flash repaints this same ring on
+         the canvas afterwards, so the two must agree on the width -- hence one
+         constant substituted in, not a literal on each side that can drift. */
+      .cell{background:var(--cell-empty);border:{BW}px solid transparent;border-radius:3px;
         position:relative;overflow:visible;}
       /* Corridor stubs are sized FROM the grid gap, not hardcoded, so widening
          the gap cannot leave two connected rooms looking disconnected: each stub
@@ -115,10 +123,10 @@
          overlap -- and every stub meets its opposite number mid-gap. Change
          GRID_GAP alone and the joins follow. */
       .corridor{position:absolute;background:inherit;z-index:0;border-radius:1px;}
-      .corridor.n{top:-{OUT}%;left:32%;width:36%;height:{SPAN}%;}
-      .corridor.s{bottom:-{OUT}%;left:32%;width:36%;height:{SPAN}%;}
-      .corridor.e{right:-{OUT}%;top:32%;height:36%;width:{SPAN}%;}
-      .corridor.w{left:-{OUT}%;top:32%;height:36%;width:{SPAN}%;}
+      .corridor.n{top:-{OUT}%;left:{MPOS}%;width:{MSPAN}%;height:{SPAN}%;}
+      .corridor.s{bottom:-{OUT}%;left:{MPOS}%;width:{MSPAN}%;height:{SPAN}%;}
+      .corridor.e{right:-{OUT}%;top:{MPOS}%;height:{MSPAN}%;width:{SPAN}%;}
+      .corridor.w{left:-{OUT}%;top:{MPOS}%;height:{MSPAN}%;width:{SPAN}%;}
       .cell.body{background:var(--cell-body);border-style:double;}
       .cell.base{background:var(--cell-base);border-style:double;}
       .cell.boss{background:var(--cell-boss);border-style:double;}
@@ -151,6 +159,9 @@
     // corridor-stub lengths are both generated from it, so the two can never
     // drift apart.
     const GRID_GAP = 0.030;
+    // Cell border width in LOGICAL px, shared by the chrome CSS ({BW}) and the
+    // loose-key flash ring, which paints over that exact band.
+    const CELL_BORDER_PX = 3;
     const geom = (E) => {
       const pad = GRID_GAP * E, gap = GRID_GAP * E;
       const cell = (E - 2 * pad - 7 * gap) / 8;
@@ -161,6 +172,13 @@
     // overlap is what the original hardcoded 17%/22% pair amounted to at the old
     // 1.3% gap, kept here as a ratio so it survives any GRID_GAP.
     const CORRIDOR_OVERLAP = 5.2, CORRIDOR_INSET = 5;
+    // Where a corridor stub crosses its cell's edge, as a % of the cell's
+    // PADDING box (what a CSS % inside .cell resolves against): the door mouth.
+    // Substituted into the .corridor rules, and read back by the loose-key
+    // flash so its ring breaks at the doors exactly where the CSS border does
+    // -- a stub is drawn over the border, so a flashing room must not suddenly
+    // look sealed.
+    const MOUTH_POS = 32, MOUTH_SPAN = 36;
     const corridorRatios = () => {
       const g = geom(1);
       const out = (g.gap / g.cell) * 100 + CORRIDOR_OVERLAP;
@@ -279,6 +297,11 @@
         if (dir==="NORTH") d.n=true; if (dir==="SOUTH") d.s=true; if (dir==="EAST") d.e=true; if (dir==="WEST") d.w=true; return d; }
       return d;
     };
+    // A key overlay's name is "<colour>_<shape>" and nothing else -- both halves
+    // must be in the catalogs, so PGT_RED / DE_* / 2WAY_NS cannot pass.
+    const isKeyName = (lower) =>
+      /^([a-z]+)_([a-z]+)$/.test(lower) && !!COLORS[lower.split("_")[0]]
+      && SHAPE_NAMES.has(lower.split("_")[1]);
     const bodyKind = (names) => {
       for (const n of names) if (n==="ICON_BASE") return "base";
       for (const n of names) if (n==="ICON_BOSS") return "boss";
@@ -304,11 +327,21 @@
       let canOpen=false, hasKeyblock=false;
       if (kind==="unopened") for (const n of r.images) {
         const l=n.toLowerCase();
-        if (/^([a-z]+)_([a-z]+)$/.test(l) && COLORS[l.split("_")[0]] && SHAPE_NAMES.has(l.split("_")[1])) {
-          hasKeyblock=true; if (heldKeys.has(l)) canOpen=true;
-        }
+        if (isKeyName(l)) { hasKeyblock=true; if (heldKeys.has(l)) canOpen=true; }
       }
-      return { kind, body, canOpen, hasKeyblock, parity: r.parity };
+      // A key overlay on an OPENED room is the key ITSELF lying on the floor,
+      // not a lock (the same overlay on an unopened room is the door's
+      // requirement -- that is the hasKeyblock branch above). It stays on the
+      // game's map until somebody picks the key up, so an overlay we are not
+      // also carrying in the keybag means: still there, still yours to grab.
+      // The keybag check is belt-and-braces for the frame or two between the
+      // pickup and the map dropping the icon.
+      let looseKey = false;
+      if (kind==="body"||kind==="base"||kind==="boss") for (const n of r.images) {
+        const l=n.toLowerCase();
+        if (isKeyName(l) && !heldKeys.has(l)) { looseKey=true; break; }
+      }
+      return { kind, body, canOpen, hasKeyblock, looseKey, parity: r.parity };
     };
 
     // ---- chrome: build icon-less grid HTML, render via foreignObject --------
@@ -520,6 +553,53 @@
         ctx.stroke();
       }
 
+      // ---- loose-key flash ---------------------------------------------------
+      // A key you can still walk over gets its room's border alternating the two
+      // colours the map ALREADY uses for key doors: #33ff33 "the key is yours"
+      // and #ff0000 "it is not". That is the whole point of the pairing -- the
+      // room blinking those two colours is holding what turns some red-ringed
+      // room green, so the eye connects the two without a line between them.
+      //
+      // Painted here on the canvas rather than as a chrome class because the
+      // chrome costs an SVG round trip per frame; this pass rides the same
+      // cached-chrome path as the FOV cone. Drawn AFTER the corridor stubs and
+      // BEFORE the icons, exactly where the CSS border sits in the stack.
+      let flashing = 0;
+      if (keyFlashOn && lastRooms) {
+        const sc = RE / EDGE, bw = CELL_BORDER_PX * sc;
+        const p = gE.pad * sc, s = gE.step * sc, c = gE.cell * sc;
+        // Door mouth, in cell-local px. The CSS %s resolve against the padding
+        // box, so they start one border in and span what is left.
+        const inner = c - 2 * bw;
+        const m0 = bw + inner * (MOUTH_POS / 100), m1 = m0 + inner * (MOUTH_SPAN / 100);
+        // An edge with a door is two segments with the mouth cut out of it, an
+        // edge without one is a single run corner to corner. Runs go the FULL
+        // cell extent so the four corners are covered by the overlap.
+        const segs = (open) => open ? [[0, m0], [m1, c]] : [[0, c]];
+        ctx.lineWidth = bw;
+        ctx.lineCap = "butt";
+        ctx.strokeStyle = flashPhase ? FLASH_RED : FLASH_GREEN;
+        ctx.beginPath();
+        for (const r of lastRooms) {
+          if (r.gx < 0 || r.gx > 7 || r.gz < 0 || r.gz > 7) continue;
+          const info = roomInfo(r);
+          if (!info.looseKey) continue;
+          flashing++;
+          const x0 = p + r.gx * s, y0 = p + r.gz * s;
+          // No known body shape means no known doors: ring the whole cell.
+          const d = info.body ? parseDoors(info.body) : {};
+          // Inset by half a stroke: canvas centres a stroke on its path and the
+          // CSS border sits wholly INSIDE the cell box, so this lands on the
+          // same band of pixels the chrome just drew.
+          for (const [a, b] of segs(d.n)) { ctx.moveTo(x0 + a, y0 + bw / 2); ctx.lineTo(x0 + b, y0 + bw / 2); }
+          for (const [a, b] of segs(d.s)) { ctx.moveTo(x0 + a, y0 + c - bw / 2); ctx.lineTo(x0 + b, y0 + c - bw / 2); }
+          for (const [a, b] of segs(d.w)) { ctx.moveTo(x0 + bw / 2, y0 + a); ctx.lineTo(x0 + bw / 2, y0 + b); }
+          for (const [a, b] of segs(d.e)) { ctx.moveTo(x0 + c - bw / 2, y0 + a); ctx.lineTo(x0 + c - bw / 2, y0 + b); }
+        }
+        ctx.stroke();
+      }
+      setFlashing(flashing > 0);
+
       try { if (lastRooms) compositeIcons(lastRooms, RE); } catch (e) { post("render_err:composite " + (e.message||e)); }
       try {
         const data = ctx.getImageData(0, 0, RE, RE).data;
@@ -561,6 +641,29 @@
       }
     };
 
+    // ---- loose-key flash driver --------------------------------------------
+    // The two colours are the key-door pair from CHROME_CSS, unchanged: the
+    // flash is meant to be read as "this room holds the thing that flips a red
+    // ring to a green one", so it must speak in those exact colours.
+    const FLASH_GREEN = "#33ff33", FLASH_RED = "#ff0000";
+    // Half-period: 250ms, so the colour changes 4x a second. "Quickly" without
+    // being a strobe -- and cheap, at 4 repaints a second against the 30/s the
+    // cone is capped at, on the same cached-chrome path. The flash costs a
+    // fraction of what one camera spin already does.
+    const FLASH_MS = 250;
+    let flashPhase = 0, flashTimer = null;
+    // Driven by the render itself: drawMapLayers knows whether it just drew any
+    // flashing room, so the timer can never outlive the last loose key on the
+    // floor (picked up, or the floor wiped) and leave the map exporting frames
+    // for an animation nobody can see.
+    const setFlashing = (want) => {
+      if (want && flashTimer === null) {
+        flashTimer = setInterval(() => { flashPhase ^= 1; fastRepaint(); }, FLASH_MS);
+      } else if (!want && flashTimer !== null) {
+        clearInterval(flashTimer); flashTimer = null; flashPhase = 0;
+      }
+    };
+
     const doRender = () => {
       if (rendering) { dirty = true; return; }
       rendering = true; dirty = false;
@@ -570,7 +673,10 @@
         .split("{FONT}").join((0.646 * gE.cell).toFixed(1))
         .split("{GAP}").join((GRID_GAP * 100).toFixed(1))
         .split("{OUT}").join(cr.out)
-        .split("{SPAN}").join(cr.span);
+        .split("{SPAN}").join(cr.span)
+        .split("{BW}").join(String(CELL_BORDER_PX))
+        .split("{MPOS}").join(String(MOUTH_POS))
+        .split("{MSPAN}").join(String(MOUTH_SPAN));
       const chrome = lastRooms ? buildChromeHTML(lastRooms, E) : ('<div class="grid" style="width:'+E+'px;height:'+E+'px"></div>');
       const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="'+RE+'" height="'+RE+'" viewBox="0 0 '+E+' '+E+'">' +
         '<foreignObject width="'+E+'" height="'+E+'">' +
@@ -606,6 +712,10 @@
       }
       if (c.startsWith("rooms:")) { try { lastRooms = JSON.parse(c.slice(6)); } catch (_) { return; } repaint(); return; }
       if (c.startsWith("held_keys:")) { heldKeys = new Set(c.slice(10).split(",").filter(Boolean)); repaint(); return; }
+      // Loose-key flash toggle. fastRepaint, not repaint: turning it off has to
+      // wipe the ring from the surface in the same beat (and stop the timer via
+      // setFlashing), and nothing about the chrome has changed.
+      if (c.startsWith("key_flash:")) { keyFlashOn = (c.slice(10) !== "off"); fastRepaint(); return; }
       // "camera_angle:off" (the toggle) and any unparseable payload both mean
       // NO BEARING, which draws no cone -- never a cone left frozen at the last
       // angle it happened to have.

@@ -93,6 +93,36 @@ because 0 is a real direction and a confident wrong answer is worse than none.
 stops the per-frame angle push and the repaints it triggers, so it is a real
 cost saving and not just a visual one -- see Map render cost below.
 
+## Key room flash
+
+A key lying in a room you have opened and have **not** picked up yet makes that
+room's border on the map panel alternate green and red, four times a second.
+
+The two colours are not decoration -- they are the map's existing key-door pair,
+`#33ff33` "you hold this key" and `#ff0000` "you do not". A room blinking between
+them is holding the thing that turns some red-ringed room green, so the eye pairs
+the key with its door without a line drawn between them.
+
+The same `colour_shape` overlay means opposite things depending on the room it
+sits on, and the flash keys off exactly that distinction:
+
+| Overlay sits on | Meaning | Border |
+|---|---|---|
+| an **unopened** room | the key that door *requires* | static red / green (unchanged) |
+| an **opened** room | the key itself, on the floor | **flashes green/red** |
+
+It stops on its own the moment the reason does: the game's map drops the icon
+when anybody picks the key up, and the keybag set is checked as well for the
+frame or two in between.
+
+**Cost.** The ring is painted on the canvas over the cached chrome, on the same
+path as the FOV cone -- not as a chrome class, which would cost an SVG round trip
+per frame. Four repaints a second against the cone's 30, and the timer is armed by
+the render that drew a flashing room and disarmed by the one that did not, so a
+floor with no loose key exports nothing extra (see Map render cost -- every
+repaint ships the whole surface). **Key room flash** in the settings panel
+(default on) turns it off.
+
 ## Next-door hint
 
 With **Next-door hint** on (settings panel, default on), the frontier door the
@@ -201,7 +231,8 @@ scored frontier-door ranking behind the next-door hint.
 - **Rooms panel** -- the floor grid. Tile colour = parity (tan crit,
   near-black bonus / unknown, yellow = crit with key held, red = floor
   dead); corridors drawn between connected rooms; door icons show the
-  key or skill required.
+  key or skill required; a room holding a key nobody has picked up yet
+  flashes its border green/red (see Key room flash).
 - **Keys panel** -- every colour x shape key. Cell parity border,
   found / lock coordinates if seen, dim if unseen.
 - **Line Draw panel** -- toggles the in-world line to tracked ground

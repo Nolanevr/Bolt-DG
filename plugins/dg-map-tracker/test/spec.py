@@ -1362,6 +1362,47 @@ end
           'total = total + h' in src)
     check('fingerprint state is wiped with the floor', 'S.rooms_fp           = nil' in src)
 
+    # ---- loose-key flash ----------------------------------------------------
+    # A key lying in an opened room flashes that room's border green/red. Three
+    # things make it right rather than merely visible, and all three are one
+    # edit from being lost:
+    print('\nloose-key flash')
+    #  1. It must speak the key-door colours. The flash means "this room holds
+    #     what turns some red ring green"; in any other pair of colours it is
+    #     just a blinking room and the pairing is gone.
+    for name, colour in (('key-held green', '#33ff33'), ('key-missing red', '#ff0000')):
+        check('flash reuses the %s of the key doors' % name,
+              js.count(colour) >= 2, 'only in CHROME_CSS')
+    #  2. It flashes the room the key is IN, never the door it opens. The same
+    #     colour_shape overlay means opposite things on the two: on an UNOPENED
+    #     room it is the lock's requirement (hasKeyblock, already drawn static
+    #     red/green), on an opened one it is the key itself lying there.
+    li = js.index('let looseKey')
+    body = js[li:js.index('return { kind', li)]
+    check('only OPENED rooms can hold a loose key',
+          'kind==="body"||kind==="base"||kind==="boss"' in body)
+    check('a key already in the keybag does not flash', '!heldKeys.has(l)' in body)
+    #  3. Every repaint ships the WHOLE surface to Lua, so an animation that
+    #     outlives its cause is a permanent pixel stream. The timer is armed by
+    #     the render that drew a flashing room and disarmed by the one that did
+    #     not, so a pickup / floor wipe / toggle-off stops it by itself.
+    check('the flash rides the cached-chrome path, not a full SVG re-render',
+          'flashPhase ^= 1; fastRepaint()' in js)
+    check('the flash timer is armed and disarmed by the render itself',
+          'setFlashing(flashing > 0)' in js and 'clearInterval(flashTimer)' in js)
+    check('the flash has a settings row', 'key_room_flash' in settings)
+    check('the flash toggle is polled and pushed to the map',
+          'KEY_ROOM_FLASH' in src and 's.key_room_flash' in src
+          and 'key_flash:' in src and 'key_flash:' in js)
+    #  4. The chrome's border and the flash ring are the same band of pixels,
+    #     and a corridor stub is drawn OVER that band -- so both the width and
+    #     the door mouth come from one constant each. Hardcode either on one
+    #     side and a flashing room grows a fat ring, or looks sealed.
+    check('border width is one constant, shared with the chrome CSS',
+          'CELL_BORDER_PX' in js and 'border:{BW}px' in js)
+    check('the flash ring breaks at the door mouths, from the CSS constants',
+          'MOUTH_POS' in js and 'left:{MPOS}%' in js and 'width:{MSPAN}%' in js)
+
     # ---- parity: verdicts only about rooms in the tree -----------------------
     # Every propagator that SEEDS parity gates on seen[] (facts, resource_bonus,
     # skill_bonus, skill_crit). Bonus-UP did not, and it reads "no children" as
