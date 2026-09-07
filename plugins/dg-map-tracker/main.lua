@@ -199,6 +199,7 @@ SET.sync = { browser = nil }
 local SCAN_RANGE_TILES       = SET.get("scan_range_tiles",      64)
 local NEXT_DOOR_HINT         = SET.get("next_door_hint",        true)
 local FOV_CONE_ENABLED       = SET.get("fov_cone_enabled",      true)
+local KEY_ROOM_FLASH         = SET.get("key_room_flash",        true)
 
 local region_browser   -- forward decls
 local keybag_region_browser
@@ -302,6 +303,7 @@ local function poll_settings()
   end
   if s.next_door_hint ~= nil then NEXT_DOOR_HINT = s.next_door_hint end
   if s.fov_cone_enabled ~= nil then FOV_CONE_ENABLED = s.fov_cone_enabled end
+  if s.key_room_flash ~= nil then KEY_ROOM_FLASH = s.key_room_flash end
   -- Map size: recreate the rooms panel at the new scale (no resize API on
   -- embedded browsers; aspect stays locked because both dims scale together).
   local msc = tonumber(s.rooms_panel_scale) or 100
@@ -1755,6 +1757,17 @@ local function dump_rooms()
       _held_keys_msg_last = hmsg
       rooms_browser:sendmessage(hmsg)
     end
+    -- Loose-key flash toggle. Which rooms flash is the map's own call (it
+    -- already has the overlays and the held set); Lua only says whether the
+    -- feature is on. Deduped like held_keys -- but on S, not a file-scope
+    -- local: _held_keys_msg_last is declared BELOW this function, so the name
+    -- here is a global and reprime_map's reset of the local never reaches it.
+    -- S.* is the same table the hdr/dead dedupes use and is visible to both.
+    local fmsg = "key_flash:" .. (KEY_ROOM_FLASH and "on" or "off")
+    if fmsg ~= S.key_flash_msg_last then
+      S.key_flash_msg_last = fmsg
+      rooms_browser:sendmessage(fmsg)
+    end
   end
 
   -- Send to the rooms panel too. Deduped by message body so a stable graph
@@ -1771,6 +1784,7 @@ local function dump_rooms()
       _held_keys_msg_last = ""
       S.hdr_msg_last = nil
       S.dead_msg_last = nil
+      S.key_flash_msg_last = nil
     end
     -- Floor-dead banner. The grid freezes on death (compute_parity returns
     -- early), and a frozen grid is indistinguishable from a live one -- so the
@@ -2003,7 +2017,7 @@ local function reprime_map()
   if build_img_atlas_msg then local a = build_img_atlas_msg(); if a and #a > 0 then rooms_browser:sendmessage(a) end end
   local srmsg = shape_rot_msg(); if srmsg then rooms_browser:sendmessage(srmsg) end
   _rooms_msg_last = ""; _held_keys_msg_last = ""
-  S.hdr_msg_last = nil; S.dead_msg_last = nil
+  S.hdr_msg_last = nil; S.dead_msg_last = nil; S.key_flash_msg_last = nil
 end
 
 open_rooms_browser = function ()

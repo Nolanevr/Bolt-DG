@@ -36,6 +36,9 @@ return function (deps)
     -- Camera facing wedge on the map panel. Off also silences the per-frame
     -- angle push, so it is a real cost saving and not only a visual one.
     { key = "fov_cone_enabled",     type = "bool",        default = true,  label = "Camera FOV cone", category = "normal" },
+    -- Map-panel border flash on a room holding a key nobody has picked up yet.
+    -- Same reasoning as the next-door hint: anything that blinks needs a switch.
+    { key = "key_room_flash",       type = "bool",        default = true,  label = "Key room flash", category = "normal" },
     -- Ground-key cursor hint: the key icon(s) stacked beside the mouse.
     { key = "cursor_keys_enabled",  type = "bool",        default = true,  label = "Cursor key icons", category = "normal" },
     { key = "cursor_keys_scale",    type = "int_stepper", default = 200, min = 50, max = 300, step = 10,
