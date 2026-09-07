@@ -27,8 +27,10 @@ LESSONS PAID FOR IN REAL BUGS -- do not undo these:
 """
 
 import io
+import json
 import os
 import re
+import subprocess
 import sys
 
 import lupa
@@ -1469,6 +1471,41 @@ end
     stub = set(re.findall(r'\["([A-Z0-9_]+)"\]', PRELUDE))
     check('stub ROOM_DOORS covers all %d shipped door shapes' % len(shipped),
           shipped <= stub, 'missing: ' + ', '.join(sorted(shipped - stub)))
+
+    # ---- one-click install pointer ------------------------------------------
+    # meta.json is what Bolt actually installs from: it reads the url, fetches
+    # that tarball, and checks it against the sha256. Nothing in the plugin can
+    # detect a wrong pointer -- a stale sha fails the install loudly, but a
+    # stale URL SUCCEEDS and quietly installs a different build, which is how a
+    # repo whose owner changed went on serving the old account's v1.0-pre5 to
+    # everyone who followed its own README. The map looked alive and half its
+    # features simply were not there.
+    print('\none-click install pointer')
+    root = os.path.abspath(os.path.join(HERE, os.pardir, os.pardir, os.pardir))
+    meta = json.load(io.open(os.path.join(root, 'meta.json'), encoding='utf-8'))
+    bolt = json.load(io.open(os.path.join(os.path.dirname(MAIN), 'bolt.json'),
+                             encoding='utf-8'))
+    check('meta.json version matches bolt.json',
+          meta['version'] == bolt['version'],
+          '%s vs %s' % (meta['version'], bolt['version']))
+    check('the asset URL names that same version',
+          '/download/v%s/' % meta['version'] in meta['url']
+          and meta['url'].endswith('bolt-dg-v%s.tar.gz' % meta['version']),
+          meta['url'])
+    check('sha256 is a full digest', re.fullmatch(r'[0-9a-f]{64}', meta['sha256'] or ''),
+          meta['sha256'])
+    # The check that would have caught it: the release must live in THIS repo.
+    try:
+        remote = subprocess.check_output(
+            ['git', '-C', root, 'remote', 'get-url', 'origin'],
+            text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception:
+        remote = ''
+    slug = re.search(r'(?:github\.com[:/])([^/]+/[^/]+?)(?:\.git)?$', remote)
+    if slug:
+        check('the release is hosted by this repo, not another account',
+              '/%s/releases/' % slug.group(1) in meta['url'],
+              'origin is %s but meta.json points at %s' % (slug.group(1), meta['url']))
 
     print('\n%s  (%d failed)' % ('ALL GREEN' if not FAILS else 'FAILURES: ' + ', '.join(FAILS),
                                  len(FAILS)))
